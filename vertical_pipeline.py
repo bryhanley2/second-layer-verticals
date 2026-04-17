@@ -769,9 +769,15 @@ def get_seen_from_vertical_tab():
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
-    # Select today's vertical
-    day_of_year = datetime.date.today().timetuple().tm_yday
-    vertical_config = VERTICALS[day_of_year % len(VERTICALS)]
+    # Select vertical — override takes priority over auto rotation
+    override = os.environ.get("VERTICAL_OVERRIDE", "").strip()
+    if override.isdigit() and 0 <= int(override) <= 9:
+        vertical_index = int(override)
+        print(f"Override active — forcing vertical index {vertical_index}")
+    else:
+        day_of_year    = datetime.date.today().timetuple().tm_yday
+        vertical_index = day_of_year % len(VERTICALS)
+    vertical_config = VERTICALS[vertical_index]
     vertical_name   = vertical_config["name"]
 
     print(f"\n{'='*60}")
