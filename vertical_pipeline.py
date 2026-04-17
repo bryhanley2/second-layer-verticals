@@ -782,7 +782,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"VERTICAL PIPELINE — {vertical_name}")
-    print(f"Date: {datetime.date.today()} | Day {day_of_year} | Index {day_of_year % len(VERTICALS)}")
+    print(f"Date: {datetime.date.today()} | Index {vertical_index} | Override: {bool(override)}")
     print(f"{'='*60}\n")
 
     # Get previously seen from Vertical Pipeline tab to avoid re-scoring
