@@ -24,7 +24,6 @@ import xml.etree.ElementTree as ET
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import anthropic
-from sheets_logger import get_previously_seen_companies
 
 # ── ENV ────────────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -732,6 +731,42 @@ def send_email(results, vertical_config):
         print(f"Email error: {e}")
 
 
+# ── SELF-CONTAINED DEDUP ──────────────────────────────────────────────────────
+def get_seen_from_vertical_tab():
+    """
+    Reads the Vertical Pipeline tab in Google Sheets and returns a set of
+    lowercased company names already scored — no dependency on main pipeline.
+    Returns empty set if tab doesn't exist yet or on any error.
+    """
+    seen = set()
+    try:
+        import google.oauth2.service_account as sa
+        import googleapiclient.discovery as gd
+
+        if not GOOGLE_SHEET_ID:
+            return seen
+
+        creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "{}")
+        creds_data = json.loads(creds_json)
+        creds = sa.Credentials.from_service_account_info(
+            creds_data,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        service = gd.build("sheets", "v4", credentials=creds, cache_discovery=False)
+        result  = service.spreadsheets().values().get(
+            spreadsheetId=GOOGLE_SHEET_ID,
+            range="Vertical Pipeline!C:C"   # Column C = Company name
+        ).execute()
+        rows = result.get("values", [])
+        for row in rows[1:]:   # Skip header
+            if row:
+                seen.add(row[0].lower().strip())
+        print(f"Previously seen (vertical tab): {len(seen)} companies")
+    except Exception as e:
+        print(f"Dedup read skipped: {e}")
+    return seen
+
+
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
     # Select today's vertical
@@ -744,11 +779,8 @@ def main():
     print(f"Date: {datetime.date.today()} | Day {day_of_year} | Index {day_of_year % len(VERTICALS)}")
     print(f"{'='*60}\n")
 
-    # Get previously seen to avoid re-scoring
-    try:
-        previously_seen = get_previously_seen_companies(GOOGLE_SHEET_ID)
-    except Exception:
-        previously_seen = set()
+    # Get previously seen from Vertical Pipeline tab to avoid re-scoring
+    previously_seen = get_seen_from_vertical_tab()
 
     # Source candidates
     print("--- Sourcing ---")
