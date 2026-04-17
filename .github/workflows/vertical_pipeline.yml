@@ -1,0 +1,42 @@
+name: Run Vertical Pipeline
+
+on:
+  schedule:
+    # Runs daily at 8am EST (1pm UTC) — one hour after main pipeline
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+    inputs:
+      vertical_override:
+        description: 'Force a specific vertical index (0-9, leave blank for auto)'
+        required: false
+        default: ''
+
+jobs:
+  run-vertical-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install anthropic requests beautifulsoup4 \
+            google-auth google-auth-httplib2 google-api-python-client
+
+      - name: Run vertical pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          MIN_SCORE_PCT: "65"
+          VERTICAL_OVERRIDE: ${{ github.event.inputs.vertical_override }}
+        run: python vertical_pipeline.py
