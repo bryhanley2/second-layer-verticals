@@ -728,7 +728,7 @@ def send_email(results, vertical_config):
             s.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
         print(f"Email sent: {subject}")
     except Exception as e:
-        print(f"Email error: {e}")
+        print(f"Email skipped (check App Password in secrets): {e}")
 
 
 # ── SELF-CONTAINED DEDUP ──────────────────────────────────────────────────────
