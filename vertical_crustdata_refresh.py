@@ -199,7 +199,7 @@ Return ONLY valid JSON array with no markdown:
         
         print(f"  Calling Claude API...")
         msg = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-opus-4-7",
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
