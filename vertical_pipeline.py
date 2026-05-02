@@ -211,7 +211,8 @@ def main():
         vertical = get_vertical(idx)
     else:
         day_of_year = datetime.now().timetuple().tm_yday
-        idx, vertical = get_vertical_by_day_of_year(day_of_year)
+        vertical = get_vertical_by_day_of_year(day_of_year)
+        idx = vertical['id']
 
     name = vertical["name"]
     rss_feeds = vertical.get("rss_feeds", [])
