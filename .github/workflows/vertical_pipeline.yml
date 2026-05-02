@@ -1,42 +1,35 @@
-name: Run Vertical Pipeline
+name: Vertical Pipeline
 
 on:
   schedule:
-    # Runs daily at 8am EST (1pm UTC) — one hour after main pipeline
+    # Daily at 8am EST (1pm UTC) — rotates through verticals by day of year
     - cron: '0 13 * * *'
   workflow_dispatch:
     inputs:
-      vertical_override:
-        description: 'Force a specific vertical index (0-9, leave blank for auto)'
+      vertical_index:
+        description: 'Vertical index (0-9), leave blank for day-of-year rotation'
         required: false
         default: ''
 
 jobs:
-  run-vertical-pipeline:
+  run:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: |
-          pip install anthropic requests beautifulsoup4 \
-            google-auth google-auth-httplib2 google-api-python-client
-
+          python -m pip install --upgrade pip
+          pip install anthropic requests gspread google-auth feedparser
       - name: Run vertical pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
-          MIN_SCORE_PCT: "65"
-          VERTICAL_OVERRIDE: ${{ github.event.inputs.vertical_override }}
+          VERTICAL_INDEX: ${{ github.event.inputs.vertical_index }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
         run: python vertical_pipeline.py
