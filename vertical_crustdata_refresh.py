@@ -1,9 +1,8 @@
 """
-vertical_crustdata_refresh.py
-==============================
+vertical_crustdata_refresh.py (Updated)
+======================================
 
-Weekly Crustdata refresh for vertical-specific sourcing.
-
+Weekly Crustdata refresh for vertical-specific sourcing with final 10 verticals.
 Each vertical gets mapped to Crustdata search keywords, then results are cached
 in a dedicated Google Sheets tab (e.g., "Crustdata Cache - V0", "Crustdata Cache - V1", etc.).
 
@@ -17,7 +16,6 @@ REQUIRES ENV VARS:
     ANTHROPIC_API_KEY
     GOOGLE_CREDENTIALS_JSON (or GOOGLE_SERVICE_ACCOUNT_JSON)
     GOOGLE_SHEET_ID
-    (optional) CRUSTDATA_API_KEY — if you have direct API access
 """
 
 import os
@@ -45,75 +43,75 @@ if not SHEET_ID or not ANTHROPIC_API_KEY or not CREDS_JSON_STR:
     print("FATAL: Missing env vars. Required: GOOGLE_SHEET_ID, ANTHROPIC_API_KEY, GOOGLE_CREDENTIALS_JSON")
     sys.exit(1)
 
-# 10 verticals mapped to Crustdata search keywords and funding criteria
+# 10 FINAL VERTICALS with consolidated categories
 VERTICALS = [
     {
         "id": 0,
-        "name": "AML/KYC Compliance & Fintech Infrastructure",
-        "keywords": ["AML", "KYC", "compliance", "fintech", "banking", "payments"],
+        "name": "Energy, Climate & Sustainability Tech",
+        "keywords": ["climate", "clean energy", "renewable", "carbon", "emissions", "EV", "grid", "battery", "energy efficiency", "green", "sustainability"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 1,
-        "name": "HIPAA Compliance & Healthcare AI",
-        "keywords": ["HIPAA", "healthcare", "medical", "telemedicine", "EHR", "patient data"],
+        "name": "Data Privacy, Governance & Compliance",
+        "keywords": ["privacy", "GDPR", "data protection", "PII", "compliance", "DPA", "consent management", "data governance", "security"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 2,
-        "name": "AI Governance & Model Risk",
-        "keywords": ["AI governance", "model risk", "MLOps", "AI compliance", "responsible AI"],
+        "name": "Fintech, Payments & Financial Compliance",
+        "keywords": ["fintech", "AML", "KYC", "compliance", "payments", "banking", "financial crime", "sanctions", "fraud detection", "lending"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 3,
-        "name": "Legal AI & Contract Management",
-        "keywords": ["legal tech", "contract", "AI lawyer", "legal AI", "compliance automation"],
+        "name": "Space, Ocean Tech & Advanced Navigation",
+        "keywords": ["space", "satellite", "ocean", "maritime", "navigation", "geospatial", "remote sensing", "autonomous vessels"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 4,
-        "name": "Cybersecurity & Threat Detection",
-        "keywords": ["cybersecurity", "threat detection", "security operations", "incident response"],
+        "name": "AI Governance, Safety & Responsible AI",
+        "keywords": ["AI governance", "model risk", "AI safety", "responsible AI", "bias detection", "LLM monitoring", "AI compliance"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 5,
-        "name": "Data Privacy & PII Compliance",
-        "keywords": ["data privacy", "GDPR", "data protection", "PII", "privacy compliance"],
+        "name": "Biotech, Medtech & Life Sciences Compliance",
+        "keywords": ["biotech", "medtech", "pharma", "clinical trials", "HIPAA", "FDA", "drug development", "regulatory", "life sciences"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 6,
-        "name": "Supply Chain Risk & Compliance",
-        "keywords": ["supply chain", "SBOM", "supply chain risk", "vendor management", "procurement"],
+        "name": "Supply Chain, Logistics & Legal Tech",
+        "keywords": ["supply chain", "logistics", "SBOM", "vendor management", "procurement", "traceability", "legal tech", "contract automation"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 7,
-        "name": "Energy Transition & Climate Tech",
-        "keywords": ["climate", "clean energy", "green tech", "carbon", "emissions", "EV"],
+        "name": "Cybersecurity, Infrastructure & Operations",
+        "keywords": ["cybersecurity", "threat detection", "incident response", "CISO", "security operations", "vulnerability", "zero trust"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 8,
-        "name": "Insurance & Risk Management",
-        "keywords": ["insurance", "insurtech", "risk management", "underwriting", "claims"],
+        "name": "Insurance, Risk Management & Real Estate Tech",
+        "keywords": ["insurance", "insurtech", "risk management", "underwriting", "claims", "real estate", "construction", "project management"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
     {
         "id": 9,
-        "name": "Pharmaceutical Supply Chain & Regulatory",
-        "keywords": ["pharma", "drug development", "DSCSA", "pharmaceutical", "biotech compliance"],
+        "name": "Healthcare, Interoperability & Agtech",
+        "keywords": ["healthcare", "patient data", "interoperability", "EHR", "clinical workflow", "agriculture", "food", "traceability"],
         "funding_min": 500000,
         "funding_max": 15000000,
     },
@@ -208,36 +206,36 @@ def write_cache_results(ws: gspread.Worksheet, candidates: list):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# CRUSTDATA VIA CLAUDE (since direct API might be unavailable)
+# CRUSTDATA VIA CLAUDE
 # ──────────────────────────────────────────────────────────────────────
 
 def search_crustdata_via_claude(vertical: dict) -> list:
     """
     Use Claude to research seed-stage companies matching vertical keywords.
-    This simulates Crustdata search when direct API access is unavailable.
-
     Returns structured candidate list matching the cache schema.
     """
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    keywords = ", ".join(vertical["keywords"][:5])
+    keywords = ", ".join(vertical["keywords"][:7])
 
-    prompt = f"""You are a VC researcher. Find 8-12 REAL seed/early-stage startups in this space:
+    prompt = f"""You are a VC researcher specializing in seed-stage startups.
 
 Vertical: {vertical['name']}
 Keywords: {keywords}
+
+Find 10-15 REAL seed/Series A startups matching this vertical.
 
 Requirements:
 - Real companies (founded 2020-2026)
 - Seed or Series A stage ONLY
 - $500K–$15M in funding
-- Solve a genuine Second Layer problem (not just "in the industry")
-- Lesser-known companies preferred
+- Solve a genuine Second Layer problem (downstream of a dominant industry trend)
+- Lesser-known companies preferred over well-known ones
 
-Respond ONLY with valid JSON array:
+Respond ONLY with valid JSON array (no markdown, no explanation):
 [
   {{
     "name": "Company Name",
-    "description": "One-line: what they do",
+    "description": "One-line description of what they do",
     "website": "https://company.com",
     "funding_raised": "$5M",
     "funding_stage": "Series A",
@@ -246,14 +244,15 @@ Respond ONLY with valid JSON array:
     "founded_year": "2022",
     "location": "San Francisco, CA",
     "vertical": "{vertical['name']}",
-    "crustdata_url": "https://crustdata.com/..."
-  }}
+    "crustdata_url": ""
+  }},
+  ...
 ]"""
 
     try:
         msg = client.messages.create(
             model="claude-opus-4-20250805",
-            max_tokens=2000,
+            max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         )
         response_text = msg.content[0].text.strip()
@@ -287,7 +286,7 @@ def refresh_vertical(vertical_id: int):
     sheet = get_sheet_client()
     ws = ensure_cache_tab(sheet, vertical_id, vertical["name"])
 
-    # Search for candidates (via Claude acting as Crustdata proxy)
+    # Search for candidates (via Claude)
     print(f"  Searching for candidates...")
     candidates = search_crustdata_via_claude(vertical)
 
