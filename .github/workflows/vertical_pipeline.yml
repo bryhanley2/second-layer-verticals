@@ -31,4 +31,4 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           VERTICAL_INDEX: ${{ github.event.inputs.vertical_index }}
-        run: python vertical_crustdata_refresh.py
+        run: python vertical_crustdata_refresh.py 
