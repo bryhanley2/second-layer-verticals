@@ -1,191 +1,133 @@
 """
-Vertical Sources Configuration
+vertical_sources.py (Updated)
 ==============================
-Maps each of the 10 verticals to:
-1. Crustdata industry keywords (for the API filter)
-2. Sector-specific RSS feeds (for funding announcement parsing)
-3. Search terms for Claude web research
 
-Each vertical is indexed 0-9 matching the rotation used by the vertical pipeline.
+Defines the 10 final verticals and maps each to keyword sets,
+RSS feeds, and Claude research prompts.
+
+Used by vertical_pipeline.py and vertical_crustdata_refresh.py.
 """
 
-VERTICAL_CONFIG = {
-    0: {
-        "name": "Space & Defence AI",
-        "crustdata_keywords": [
-            "aerospace", "space", "satellite", "defense", "defence",
-            "earth observation", "space intelligence",
+# 10 FINAL VERTICALS
+VERTICALS = [
+    {
+        "id": 0,
+        "name": "Energy, Climate & Sustainability Tech",
+        "keywords": ["climate", "clean energy", "renewable", "carbon", "emissions", "EV", "grid", "battery", "energy efficiency", "green", "sustainability"],
+        "rss_feeds": [
+            "https://www.canarymedia.com/feed",
+            "https://www.greenbiz.com/feed",
+            "https://energypost.eu/feed/",
         ],
+    },
+    {
+        "id": 1,
+        "name": "Data Privacy, Governance & Compliance",
+        "keywords": ["privacy", "GDPR", "data protection", "PII", "compliance", "DPA", "consent", "data governance", "security"],
+        "rss_feeds": [
+            "https://www.iapp.org/feed/",
+            "https://techcrunch.com/category/privacy/feed/",
+        ],
+    },
+    {
+        "id": 2,
+        "name": "Fintech, Payments & Financial Compliance",
+        "keywords": ["fintech", "AML", "KYC", "compliance", "payments", "banking", "financial crime", "sanctions", "fraud", "lending"],
+        "rss_feeds": [
+            "https://fintechbusinessweekly.substack.com/feed",
+            "https://www.pymnts.com/feed/",
+        ],
+    },
+    {
+        "id": 3,
+        "name": "Space, Ocean Tech & Advanced Navigation",
+        "keywords": ["space", "satellite", "ocean", "maritime", "navigation", "geospatial", "remote sensing", "autonomous vessels"],
         "rss_feeds": [
             "https://spacenews.com/feed/",
-            "https://www.satellitetoday.com/feed/",
-            "https://breakingdefense.com/feed/",
-        ],
-        "search_terms": [
-            "space startup seed round funding",
-            "defence tech seed funding announced",
-            "satellite data seed round",
+            "https://www.marinelink.com/news/rss",
         ],
     },
-    1: {
-        "name": "AI Governance & Model Risk",
-        "crustdata_keywords": [
-            "artificial intelligence", "machine learning", "MLOps",
-            "AI safety", "AI governance", "model monitoring",
-        ],
+    {
+        "id": 4,
+        "name": "AI Governance, Safety & Responsible AI",
+        "keywords": ["AI governance", "model risk", "AI safety", "responsible AI", "bias", "LLM", "AI compliance", "model monitoring"],
         "rss_feeds": [
-            "https://venturebeat.com/category/ai/feed/",
             "https://www.theinformation.com/feed",
-        ],
-        "search_terms": [
-            "AI governance startup seed funding",
-            "model monitoring MLOps seed round",
-            "AI compliance tool seed funding",
+            "https://thealgorithmicbridge.substack.com/feed",
         ],
     },
-    2: {
-        "name": "Fintech Compliance & AML",
-        "crustdata_keywords": [
-            "fintech", "regtech", "compliance", "anti-money laundering",
-            "KYC", "financial crime",
-        ],
+    {
+        "id": 5,
+        "name": "Biotech, Medtech & Life Sciences Compliance",
+        "keywords": ["biotech", "medtech", "pharma", "clinical trials", "HIPAA", "FDA", "drug development", "regulatory", "life sciences"],
         "rss_feeds": [
-            "https://www.finextra.com/rss/headlines.aspx",
-            "https://fintechbusinessweekly.substack.com/feed",
-        ],
-        "search_terms": [
-            "fintech compliance seed round",
-            "AML KYC startup seed funding",
-            "regtech seed round announced",
+            "https://endpts.com/feed",
+            "https://www.fiercebiotech.com/rss/xml",
+            "https://www.biopharmadive.com/feeds/news/",
         ],
     },
-    3: {
-        "name": "Healthcare Navigation & Clinical AI",
-        "crustdata_keywords": [
-            "healthcare", "health tech", "clinical AI", "medical AI",
-            "healthcare navigation", "health insurance",
-        ],
+    {
+        "id": 6,
+        "name": "Supply Chain, Logistics & Legal Tech",
+        "keywords": ["supply chain", "logistics", "SBOM", "vendor management", "procurement", "traceability", "legal tech", "contract"],
         "rss_feeds": [
-            "https://www.fiercehealthcare.com/rss/xml",
+            "https://www.lawnext.com/feed",
+            "https://www.supplychainbrain.com/feeds/rss.aspx",
+        ],
+    },
+    {
+        "id": 7,
+        "name": "Cybersecurity, Infrastructure & Operations",
+        "keywords": ["cybersecurity", "threat detection", "incident response", "CISO", "security operations", "vulnerability", "zero trust"],
+        "rss_feeds": [
+            "https://www.darkreading.com/rss.xml",
+            "https://blog.cloudflare.com/rss/",
+        ],
+    },
+    {
+        "id": 8,
+        "name": "Insurance, Risk Management & Real Estate Tech",
+        "keywords": ["insurance", "insurtech", "risk management", "underwriting", "claims", "real estate", "construction", "project"],
+        "rss_feeds": [
+            "https://www.insurancejournal.com/rss/",
+            "https://www.constructionexec.com/feed",
+        ],
+    },
+    {
+        "id": 9,
+        "name": "Healthcare, Interoperability & Agtech",
+        "keywords": ["healthcare", "patient data", "interoperability", "EHR", "clinical workflow", "agriculture", "food", "traceability"],
+        "rss_feeds": [
             "https://www.mobihealthnews.com/feed",
-            "https://rockhealth.com/feed/",
-        ],
-        "search_terms": [
-            "healthcare AI seed round funding",
-            "clinical AI startup seed funding",
-            "health tech seed round announced",
+            "https://www.agritechtoday.com/feed/",
         ],
     },
-    4: {
-        "name": "Cybersecurity & Cloud Security",
-        "crustdata_keywords": [
-            "cybersecurity", "cloud security", "information security",
-            "endpoint security", "zero trust", "SASE",
-        ],
-        "rss_feeds": [
-            "https://www.darkreading.com/rss.xml",
-            "https://cyberscoop.com/feed/",
-            "https://www.theregister.com/security/headlines.atom",
-        ],
-        "search_terms": [
-            "cybersecurity startup seed funding",
-            "cloud security seed round",
-            "zero trust startup seed funding",
-        ],
-    },
-    5: {
-        "name": "Legal AI & Contract Risk",
-        "crustdata_keywords": [
-            "legal tech", "legaltech", "contract AI", "legal AI",
-            "contract analysis", "compliance",
-        ],
-        "rss_feeds": [
-            "https://www.artificiallawyer.com/feed/",
-            "https://www.law.com/international-edition/feed/",
-        ],
-        "search_terms": [
-            "legal AI seed round",
-            "legal tech seed funding",
-            "contract intelligence startup seed",
-        ],
-    },
-    6: {
-        "name": "Data Privacy & PII",
-        "crustdata_keywords": [
-            "data privacy", "PII", "privacy tech", "data governance",
-            "GDPR", "data protection",
-        ],
-        "rss_feeds": [
-            "https://iapp.org/news/feed/",
-        ],
-        "search_terms": [
-            "data privacy startup seed funding",
-            "PII protection seed round",
-            "privacy tech seed announced",
-        ],
-    },
-    7: {
-        "name": "Supply Chain & SBOM Security",
-        "crustdata_keywords": [
-            "supply chain security", "SBOM", "software supply chain",
-            "open source security", "container security",
-        ],
-        "rss_feeds": [
-            "https://www.darkreading.com/rss.xml",
-        ],
-        "search_terms": [
-            "software supply chain security seed",
-            "SBOM startup seed funding",
-            "open source security seed round",
-        ],
-    },
-    8: {
-        "name": "Consumer Fintech & Personal Finance",
-        "crustdata_keywords": [
-            "consumer fintech", "personal finance", "neobank",
-            "wealth management", "financial planning",
-        ],
-        "rss_feeds": [
-            "https://www.finextra.com/rss/headlines.aspx",
-            "https://fintechbusinessweekly.substack.com/feed",
-        ],
-        "search_terms": [
-            "consumer fintech seed funding",
-            "personal finance startup seed round",
-            "neobank seed funding announced",
-        ],
-    },
-    9: {
-        "name": "Climate Tech & Energy Transition",
-        "crustdata_keywords": [
-            "climate tech", "clean energy", "energy transition",
-            "carbon capture", "renewable energy", "sustainability tech",
-        ],
-        "rss_feeds": [
-            "https://www.ctvcnews.com/feed",
-            "https://sightlineclimate.com/feed",
-        ],
-        "search_terms": [
-            "climate tech seed round funding",
-            "clean energy startup seed funding",
-            "carbon capture seed round",
-        ],
-    },
-}
+]
 
 
-def get_vertical(index: int) -> dict:
-    """Get vertical config by index, with safe fallback."""
-    if index not in VERTICAL_CONFIG:
-        raise ValueError(f"Invalid vertical index: {index}. Must be 0-9.")
-    return VERTICAL_CONFIG[index]
+def get_vertical(vertical_id: int) -> dict:
+    """Get a vertical by ID."""
+    if 0 <= vertical_id < len(VERTICALS):
+        return VERTICALS[vertical_id]
+    return None
 
 
-def get_vertical_name(index: int) -> str:
-    return get_vertical(index).get("name", f"Vertical {index}")
+def get_vertical_by_day_of_year(day: int = None) -> dict:
+    """Get a vertical by day of year (for rotation)."""
+    from datetime import datetime
+    if day is None:
+        day = datetime.now().timetuple().tm_yday
+    vertical_id = day % len(VERTICALS)
+    return VERTICALS[vertical_id]
 
 
-def get_vertical_by_day_of_year(day_of_year: int) -> tuple[int, dict]:
-    """Rotate through verticals based on day of year."""
-    idx = day_of_year % 10
-    return idx, get_vertical(idx)
+if __name__ == "__main__":
+    print("=" * 80)
+    print("FINAL 10 VERTICALS for Second Layer VC Pipeline")
+    print("=" * 80)
+    print()
+    for v in VERTICALS:
+        print(f"V{v['id']} — {v['name']}")
+        print(f"  Keywords: {', '.join(v['keywords'][:6])}...")
+        print(f"  RSS Feeds: {len(v['rss_feeds'])} feeds")
+        print()
