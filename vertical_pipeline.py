@@ -97,6 +97,133 @@ def source_vertical_yc(keywords: list, vertical_name: str) -> list:
 
 
 # ============================================================================
+# Source 1b: SEC EDGAR Form D filings (cross-vertical, keyword-filtered)
+# ============================================================================
+def source_sec_form_d(keywords: list, vertical_name: str, days_back: int = 30) -> list:
+    """
+    Search SEC EDGAR full-text search for recent Form D filings (private
+    placements / seed & venture rounds) matching the vertical keywords.
+
+    Form D is filed within 15 days of a private raise, so this catches rounds
+    that never get press coverage. Data is sparse (name + date), so these
+    candidates rely on the Step 1b funding-verification pass.
+
+    SEC requires a descriptive User-Agent header with contact info.
+    """
+    from datetime import timedelta
+    candidates = []
+    headers = {"User-Agent": "SecondLayerVC Research bryanhanleyvc@gmail.com"}
+    end = datetime.now()
+    start = end - timedelta(days=days_back)
+    seen_names = set()
+
+    # Query EDGAR full-text search once per keyword (cap to top 4 to stay polite)
+    for kw in keywords[:4]:
+        url = (
+            "https://efts.sec.gov/LATEST/search-index"
+            f"?q=%22{kw.replace(' ', '%20')}%22&forms=D"
+            f"&dateRange=custom&startdt={start.strftime('%Y-%m-%d')}&enddt={end.strftime('%Y-%m-%d')}"
+        )
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                continue
+            hits = resp.json().get("hits", {}).get("hits", [])
+            for h in hits[:15]:
+                src = h.get("_source", {})
+                names = src.get("display_names", []) or []
+                if not names:
+                    continue
+                # display_names look like "Acme Inc (CIK 0001234567)"
+                raw = names[0]
+                name = re.sub(r"\s*\(CIK.*\)\s*", "", raw).strip()[:80]
+                key = name.lower()
+                if not name or key in seen_names:
+                    continue
+                seen_names.add(key)
+                candidates.append({
+                    "name": name,
+                    "website": "",
+                    "description": f"Form D filing matched '{kw}' in {vertical_name}",
+                    "industry": vertical_name,
+                    "hq_city": "", "hq_country": "United States",
+                    "founded_date": "", "headcount": 0,
+                    "total_funding_usd": 0,        # verified in Step 1b
+                    "last_funding_round": "seed",
+                    "last_funding_date": src.get("file_date", ""),
+                    "linkedin_url": "",
+                    "_source": "SEC Form D",
+                })
+        except Exception as e:
+            print(f"[SEC Form D '{kw}'] Error: {e}")
+
+    print(f"[SEC Form D] {len(candidates)} candidates from filings")
+    return candidates
+
+
+# ============================================================================
+# Source 1c: TechCrunch funding coverage (cross-vertical, keyword-filtered)
+# ============================================================================
+def source_techcrunch(keywords: list, vertical_name: str) -> list:
+    """Parse TechCrunch venture/startup feeds for seed rounds matching the vertical."""
+    candidates = []
+    tc_feeds = [
+        "https://techcrunch.com/category/venture/feed/",
+        "https://techcrunch.com/category/startups/feed/",
+        "https://techcrunch.com/tag/seed-funding/feed/",
+    ]
+    funding_pattern = re.compile(
+        r"([A-Z][A-Za-z0-9.\- ]{2,40})\s+(?:raises?|secures?|closes?|lands?|nabs?|bags?)\s+\$(\d+(?:\.\d+)?)\s*([MK])",
+        re.IGNORECASE,
+    )
+    kw_lower = [k.lower() for k in keywords]
+    seed_keywords = ["seed", "pre-seed", "series a"]
+
+    for feed_url in tc_feeds:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries[:40]:
+                title = (entry.get("title", "") or "").strip()
+                summary = (entry.get("summary", "") or "").strip()
+                blob = f"{title} {summary}".lower()
+                # Must match the vertical AND look seed-stage
+                if not any(k in blob for k in kw_lower):
+                    continue
+                if not any(s in blob for s in seed_keywords):
+                    continue
+                match = funding_pattern.search(title)
+                funding_usd = 0
+                name = title.split(" raises")[0].split(" secures")[0].split(" closes")[0].strip()[:80]
+                if match:
+                    name = match.group(1).strip()[:80]
+                    amount = float(match.group(2))
+                    unit = match.group(3).upper()
+                    funding_usd = amount * (1_000_000 if unit == "M" else 1_000)
+                    if funding_usd > 15_000_000:
+                        continue
+                if not name:
+                    continue
+                candidates.append({
+                    "name": name,
+                    "website": entry.get("link", ""),
+                    "description": summary[:500],
+                    "industry": vertical_name,
+                    "hq_city": "", "hq_country": "United States",
+                    "founded_date": "", "headcount": 0,
+                    "total_funding_usd": funding_usd,
+                    "last_funding_round": "seed",
+                    "last_funding_date": entry.get("published", ""),
+                    "linkedin_url": "",
+                    "_source": "TechCrunch",
+                })
+        except Exception as e:
+            print(f"[TechCrunch {feed_url}] Error: {e}")
+
+    print(f"[TechCrunch] {len(candidates)} candidates matched vertical")
+    return candidates
+
+
+# ============================================================================
 # Source 2: Vertical-specific RSS feeds
 # ============================================================================
 def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
@@ -297,6 +424,8 @@ def main():
     print("-" * 60)
     candidates = []
     candidates.extend(source_vertical_yc(keywords, name))
+    candidates.extend(source_sec_form_d(keywords, name))
+    candidates.extend(source_techcrunch(keywords, name))
     candidates.extend(source_vertical_rss(rss_feeds, name))
     candidates.extend(source_vertical_claude_research(ai_client, search_terms, name))
     print(f"\nTotal raw: {len(candidates)}")
