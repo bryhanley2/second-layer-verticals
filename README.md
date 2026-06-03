@@ -36,15 +36,33 @@ The pipeline identifies companies where a structural, technology, or regulatory 
 
 ## Pipeline Architecture
 
-### Sources
+### Main Pipeline Sources
 
 | Source | Frequency | Volume | Quality |
 |--------|-----------|--------|---------|
-| Crustdata Cache | Weekly refresh | ~75 companies | Medium — broad filter |
-| YC Companies (yc-oss API) | Per run | W25/S25/W26/F25/X25 batches | High — curated founders |
+| YC Companies (yc-oss API) | Per run | Recent batches (W23–S26) | High — curated founders |
+| SEC Form D Filings | Per run | Keyword-matched | High — legally-mandated raise signal |
+| TechCrunch | Per run | Keyword-matched | Medium — funding coverage |
 | HN Show HN | Per run | ~100 posts | Low — filter heavy |
 | RSS Funding Feeds | Per run | 3–5 seed matches | Medium — funding signal |
 | Claude Research | Per run | 6–8 candidates | High — framework-aligned |
+
+> **Note:** Crustdata was removed as a source in June 2026 due to API credit costs on the pay-as-you-go plan. The pipeline now relies entirely on free sources (YC, SEC EDGAR, RSS, TechCrunch) plus Claude Research.
+
+### Vertical Pipeline Sources (V0–V9)
+
+The vertical pipeline runs per-vertical and uses five free sources, each filtered by the vertical's keywords:
+
+| Source | How it's filtered | Notes |
+|--------|-------------------|-------|
+| YC Companies | Vertical keywords matched against company text | Replaces Crustdata; recent batches only |
+| SEC Form D | Vertical keywords as full-text search query | Catches raises with no press coverage |
+| TechCrunch | Vertical keywords + seed-stage terms | Venture/startups/seed-funding feeds |
+| Vertical RSS | Sector-specific publications | 2–3 feeds per vertical |
+| Claude Research | Vertical-specific search terms | Highest framework alignment |
+
+All candidates pass a **funding verification step** (Claude fills in funding/stage for $0 candidates) before the three hard gates run.
+
 
 ### Scoring
 
@@ -124,10 +142,12 @@ All three must pass or the company is excluded:
 
 | Secret | Used By |
 |--------|---------|
-| `ANTHROPIC_API_KEY` | Claude Research sourcing, scoring |
-| `CRUSTDATA_API_KEY` | Crustdata weekly refresh |
-| `GOOGLE_SHEETS_CREDENTIALS` | Sheet read/write |
+| `ANTHROPIC_API_KEY` | Claude Research sourcing, scoring, funding verification |
+| `GOOGLE_CREDENTIALS_JSON` | Sheet read/write |
+| `GOOGLE_SHEET_ID` | Target sheet |
 | `GITHUB_TOKEN` | GitHub search source (optional) |
+
+> `CRUSTDATA_API_KEY` is no longer required — Crustdata was removed in June 2026.
 
 ---
 
@@ -135,11 +155,13 @@ All three must pass or the company is excluded:
 
 | Source | Status | Notes |
 |--------|--------|-------|
-| Crustdata Cache | ✅ Working | 75 companies/run, endpoint fixed |
-| YC Companies | ✅ Working | yc-oss all.json filtered by batch |
-| RSS Funding | ✅ Working | 6 feeds, 3–5 seed matches/run |
-| HN Show | ✅ Working | Low quality, filter heavy |
+| YC Companies | ✅ Working | yc-oss all.json filtered by vertical keywords + batch |
+| SEC Form D | ✅ Working | EDGAR full-text search, no API key needed, requires User-Agent |
+| TechCrunch | ✅ Working | Venture/startups/seed-funding feeds, keyword-filtered |
+| RSS Funding | ✅ Working | 2–3 sector feeds per vertical |
 | Claude Research | ✅ Working | 6–8 high-quality candidates/run |
+| HN Show | ✅ Working | Main pipeline only, low quality, filter heavy |
+| Crustdata | ❌ Removed | Retired June 2026 — pay-as-you-go credit cost |
 | GitHub Search | ⚠️ Skipped | Requires GITHUB_TOKEN secret |
 
 ---
