@@ -464,7 +464,14 @@ def main():
     scored = []
     for c in passed_sl:
         result = score_candidate(ai_client, c, c["_sl_reason"])
-        if result["weighted_pct"] < MIN_SCORE_PCT:
+        # MIN_SCORE_PCT may be a single number OR a dict of {stage: threshold}.
+        # Look up the threshold based on the candidate's stage in the dict case.
+        if isinstance(MIN_SCORE_PCT, dict):
+            stage = str(c.get("last_funding_round", "") or "unknown").lower().strip()
+            threshold = MIN_SCORE_PCT.get(stage, MIN_SCORE_PCT.get("unknown", 60))
+        else:
+            threshold = MIN_SCORE_PCT
+        if result["weighted_pct"] < threshold:
             continue
         scored.append({
             "candidate": c,
@@ -475,7 +482,7 @@ def main():
         print(f"  {c['name']:35s} {result['weighted_pct']:5.1f}% [{c.get('_source', '?')}]")
 
     scored.sort(key=lambda x: x["weighted_pct"], reverse=True)
-    print(f"\nScored above {MIN_SCORE_PCT}% threshold: {len(scored)}")
+    print(f"\nScored above threshold: {len(scored)}")
 
     # Step 6: Write
     print(f"\nSTEP 5: Writing to '{VERTICAL_TAB}' tab")
