@@ -1,17 +1,18 @@
 """
-Second Layer Vertical Pipeline
-===============================
-Runs on-demand for a specific vertical (0-9). Combines:
-  1. Vertical-specific Crustdata cache (per-vertical)
-  2. Vertical-specific RSS feeds (SpaceNews for space, Fierce Healthcare for health, etc.)
-  3. Vertical-targeted Claude research prompts
+Second Layer Vertical Pipeline (Crustdata-free)
+================================================
+Runs on-demand for a specific vertical (0-9). Combines three sources:
+  1. YC Companies   — filtered by vertical keywords (replaces Crustdata)
+  2. Vertical RSS   — sector publications parsed for seed funding announcements
+  3. Claude Research — vertical-targeted research prompts
 
-All candidates pass through the three hard gates before scoring.
-Writes to the "Vertical Pipeline" tab with the vertical name annotated.
+All candidates pass through the three hard gates before scoring, then the
+Second Layer thesis filter, then 9-factor scoring. Writes to the
+"Vertical Pipeline" tab with the vertical name annotated.
 
 Usage:
-  VERTICAL_INDEX=0 python vertical_pipeline.py   # Space & Defence
-  VERTICAL_INDEX=3 python vertical_pipeline.py   # Healthcare
+  VERTICAL_INDEX=0 python vertical_pipeline.py   # Energy
+  VERTICAL_INDEX=8 python vertical_pipeline.py   # Insurance/Real Estate
   (no override) → rotates by day of year
 
 Required env vars:
@@ -22,7 +23,8 @@ import os
 import sys
 import json
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+import requests
 import feedparser
 from pipeline_utils import (
     get_sheet_client, get_anthropic_client, SHEET_ID,
@@ -32,30 +34,66 @@ from pipeline_utils import (
 )
 from vertical_sources import get_vertical, get_vertical_by_day_of_year
 
-import gspread
-
 VERTICAL_TAB = "Vertical Pipeline"
 
+# Recent YC batches considered "early enough" for the stage gate.
+# Adjust as new batches are announced.
+RECENT_YC_BATCHES = {"W23", "S23", "W24", "S24", "F24", "W25", "S25", "F25", "X25", "W26", "S26"}
+
 
 # ============================================================================
-# Source 1: Vertical Crustdata Cache
+# Source 1: YC Companies (replaces Crustdata)
 # ============================================================================
-def source_vertical_crustdata(client, vertical_idx: int) -> list:
-    cache_tab = f"Crustdata Cache - V{vertical_idx}"
+def source_vertical_yc(keywords: list, vertical_name: str) -> list:
+    """
+    Pull the full YC company dataset (yc-oss) and filter by vertical keywords.
+    This is the free, structured replacement for the Crustdata cache.
+    """
+    candidates = []
+    url = "https://yc-oss.github.io/api/companies/all.json"
     try:
-        sheet = client.open_by_key(SHEET_ID)
-        tab = sheet.worksheet(cache_tab)
-        rows = tab.get_all_records()
-        for r in rows:
-            r["_source"] = f"Crustdata V{vertical_idx}"
-        print(f"[Crustdata V{vertical_idx}] {len(rows)} candidates")
-        return rows
-    except gspread.WorksheetNotFound:
-        print(f"[Crustdata V{vertical_idx}] Tab not found — run vertical_crustdata_refresh.py first")
-        return []
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        companies = resp.json()
     except Exception as e:
-        print(f"[Crustdata V{vertical_idx}] Error: {e}")
+        print(f"[YC] Error fetching company list: {e}")
         return []
+
+    kw_lower = [k.lower() for k in keywords]
+    for co in companies:
+        # Build a searchable text blob from the company's fields
+        blob = " ".join(str(co.get(f, "")) for f in (
+            "name", "one_liner", "long_description", "industry", "subindustry", "tags"
+        )).lower()
+
+        # Keyword match against the vertical
+        if not any(k in blob for k in kw_lower):
+            continue
+
+        batch = str(co.get("batch", "")).upper().replace(" ", "")
+        # Only keep recent batches to respect the stage/age gates
+        if batch and batch not in RECENT_YC_BATCHES:
+            continue
+
+        candidates.append({
+            "name": str(co.get("name", ""))[:80],
+            "website": co.get("website", "") or co.get("url", ""),
+            "description": (co.get("one_liner") or co.get("long_description") or "")[:500],
+            "industry": vertical_name,
+            "hq_city": co.get("all_locations", "") or "",
+            "hq_country": "United States",
+            "founded_date": "",
+            "headcount": co.get("team_size", 0) or 0,
+            "total_funding_usd": 0,           # YC dataset has no funding figure
+            "last_funding_round": "seed",     # default; gate + verification refine this
+            "last_funding_date": "",
+            "linkedin_url": "",
+            "yc_batch": batch,
+            "_source": f"YC {batch}" if batch else "YC",
+        })
+
+    print(f"[YC] {len(candidates)} candidates matched vertical keywords")
+    return candidates
 
 
 # ============================================================================
@@ -81,8 +119,6 @@ def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
                     continue
                 match = funding_pattern.search(title)
                 if not match:
-                    # Still capture for research even without a dollar match
-                    # if the title contains "seed" or "pre-seed"
                     if not any(k in title.lower() for k in ["seed", "pre-seed"]):
                         continue
                     name_fallback = title.split(" raises")[0].split(" secures")[0].split(" closes")[0].strip()[:80]
@@ -93,12 +129,9 @@ def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
                         "website": entry.get("link", ""),
                         "description": summary[:500],
                         "industry": vertical_name,
-                        "hq_city": "",
-                        "hq_country": "United States",
-                        "founded_date": "",
-                        "headcount": 0,
-                        "total_funding_usd": 0,
-                        "last_funding_round": "seed",
+                        "hq_city": "", "hq_country": "United States",
+                        "founded_date": "", "headcount": 0,
+                        "total_funding_usd": 0, "last_funding_round": "seed",
                         "last_funding_date": entry.get("published", ""),
                         "linkedin_url": "",
                         "_source": f"RSS ({feed_url.split('/')[2]})",
@@ -117,12 +150,9 @@ def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
                     "website": entry.get("link", ""),
                     "description": summary[:500],
                     "industry": vertical_name,
-                    "hq_city": "",
-                    "hq_country": "United States",
-                    "founded_date": "",
-                    "headcount": 0,
-                    "total_funding_usd": funding_usd,
-                    "last_funding_round": "seed",
+                    "hq_city": "", "hq_country": "United States",
+                    "founded_date": "", "headcount": 0,
+                    "total_funding_usd": funding_usd, "last_funding_round": "seed",
                     "last_funding_date": entry.get("published", ""),
                     "linkedin_url": "",
                     "_source": f"RSS ({feed_url.split('/')[2]})",
@@ -150,7 +180,7 @@ Must be:
 - Real company with named founder and website
 
 Format each as JSON on a single line:
-{{"name": "...", "description": "...", "website": "...", "industry": "{vertical_name}", "founded_date": "YYYY", "total_funding_usd": NUMBER, "last_funding_round": "seed"}}
+{{"name": "...", "description": "...", "website": "...", "industry": "{vertical_name}", "founded_date": "YYYY", "total_funding_usd": NUMBER, "last_funding_round": "seed", "founders": "name, prior background"}}
 
 Do NOT include placeholder or made-up companies. If uncertain, skip.
 Return ONLY JSON lines, nothing else."""
@@ -183,6 +213,44 @@ Return ONLY JSON lines, nothing else."""
 
 
 # ============================================================================
+# Funding verification for $0-funding candidates (YC + RSS fallbacks)
+# ============================================================================
+def verify_zero_funding(ai_client, candidates: list) -> None:
+    """In-place: ask Claude to fill funding/stage for candidates showing $0."""
+    zero = [c for c in candidates if safe_float(c.get("total_funding_usd", 0)) == 0]
+    if not zero:
+        return
+    names = [c["name"] for c in zero][:40]  # cap to keep the prompt bounded
+    prompt = f"""For each company, return best-known total funding raised (USD) and latest round stage.
+If unsure, return null for both.
+
+Companies: {json.dumps(names)}
+
+Return ONLY a JSON object mapping company name to {{"total_funding_usd": NUMBER_OR_NULL, "stage": "STRING_OR_NULL"}}.
+No preamble."""
+    try:
+        resp = ai_client.messages.create(
+            model="claude-opus-4-7", max_tokens=1200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        verified = json.loads(resp.content[0].text.strip())
+        updated = 0
+        for c in candidates:
+            if safe_float(c.get("total_funding_usd", 0)) != 0:
+                continue
+            info = verified.get(c["name"], {})
+            if info:
+                if info.get("total_funding_usd") is not None:
+                    c["total_funding_usd"] = info["total_funding_usd"]
+                    updated += 1
+                if info.get("stage"):
+                    c["last_funding_round"] = info["stage"]
+        print(f"[Funding verify] Updated {updated} candidates")
+    except Exception as e:
+        print(f"[Funding verify] Error: {e} — proceeding with original data")
+
+
+# ============================================================================
 # Dedup
 # ============================================================================
 def deduplicate(candidates: list, existing_names: set) -> list:
@@ -201,7 +269,6 @@ def deduplicate(candidates: list, existing_names: set) -> list:
 # Main
 # ============================================================================
 def main():
-    # Determine which vertical
     override = os.environ.get("VERTICAL_INDEX", "")
     if override.strip():
         try:
@@ -210,11 +277,10 @@ def main():
             raise RuntimeError(f"Invalid VERTICAL_INDEX: {override}")
         vertical = get_vertical(idx)
     else:
-        day_of_year = datetime.now().timetuple().tm_yday
-        vertical = get_vertical_by_day_of_year(day_of_year)
-        idx = vertical['id']
+        idx, vertical = get_vertical_by_day_of_year()
 
     name = vertical["name"]
+    keywords = vertical.get("keywords", [])
     rss_feeds = vertical.get("rss_feeds", [])
     search_terms = vertical.get("search_terms", [])
 
@@ -226,14 +292,19 @@ def main():
     sheet_client = get_sheet_client()
     ai_client = get_anthropic_client()
 
-    # Step 1: Source collection
+    # Step 1: Source collection (Crustdata removed)
     print("STEP 1: Pulling from vertical-specific sources")
     print("-" * 60)
     candidates = []
-    candidates.extend(source_vertical_crustdata(sheet_client, idx))
+    candidates.extend(source_vertical_yc(keywords, name))
     candidates.extend(source_vertical_rss(rss_feeds, name))
     candidates.extend(source_vertical_claude_research(ai_client, search_terms, name))
     print(f"\nTotal raw: {len(candidates)}")
+
+    # Step 1b: Verify funding for $0 candidates before gating
+    print("\nSTEP 1b: Verifying zero-funding candidates")
+    print("-" * 60)
+    verify_zero_funding(ai_client, candidates)
 
     # Step 2: Dedup
     existing = read_existing_names(sheet_client, VERTICAL_TAB)
@@ -243,11 +314,7 @@ def main():
     # Step 3: Three hard gates
     print(f"\nSTEP 2: Three hard gates")
     print("-" * 60)
-    passed = []
-    for c in candidates:
-        ok, _ = passes_all_gates(c)
-        if ok:
-            passed.append(c)
+    passed = [c for c in candidates if passes_all_gates(c)[0]]
     print(f"Passed gates: {len(passed)} / {len(candidates)}")
 
     # Step 4: Second Layer thesis filter
