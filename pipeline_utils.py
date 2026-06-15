@@ -20,13 +20,7 @@ from google.oauth2.service_account import Credentials
 
 # ---------- Constants ----------
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "102k3pj7JjEhSXWgyBS144mgHd93MZywoWVyjWIonX50")
-
-# Stage-aware minimum score thresholds
-MIN_SCORE_PCT = {
-    "pre-seed": 55,
-    "seed":     65,
-    "unknown":  60,
-}
+MIN_SCORE_PCT = 65
 
 ALLOWED_STAGES = {
     "pre-seed", "preseed", "pre_seed", "seed", "series a", "series_a",
@@ -36,45 +30,13 @@ MAX_TOTAL_FUNDING = 15_000_000
 MAX_COMPANY_AGE_YEARS = 5
 MAX_MONTHS_SINCE_LAST_ROUND = 24
 
-# Stage-aware factor weights (excluding investor signal — handled separately)
-# Pre-seed: heavy on founder quality and thesis/market; PMF/traction are soft signals
-# Seed: more balanced; some traction evidence expected
-_WEIGHTS_PRESEED = {
-    "1A": 0.20, "1B": 0.13, "1C": 0.12,   # Founder signals: 45%
-    "2A": 0.10,                              # PMF: present but soft
-    "3A": 0.15, "3B": 0.13,                 # Market/timing: 28%
-    "5":  0.08, "6":  0.12,                 # Traction qual + cap efficiency: 20%
+# 9-factor rubric weights
+FACTOR_WEIGHTS = {
+    "1A": 0.14, "1B": 0.11, "1C": 0.10,
+    "2A": 0.15,
+    "3A": 0.12, "3B": 0.11,
+    "5": 0.10, "6": 0.10, "7": 0.07,
 }
-_WEIGHTS_SEED = {
-    "1A": 0.14, "1B": 0.11, "1C": 0.10,   # Founder signals: 35%
-    "2A": 0.15,                              # PMF: meaningful weight
-    "3A": 0.12, "3B": 0.11,                 # Market/timing: 23%
-    "5":  0.10, "6":  0.10,                 # Traction qual + cap efficiency: 20%
-}
-_WEIGHTS_UNKNOWN = _WEIGHTS_SEED  # Default to seed weights if stage unclear
-
-def _weights_for_stage(stage_label: str, has_investor_signal: bool) -> dict:
-    """
-    Return factor weights adjusted for stage and investor signal availability.
-    Investor signal (7) is optional — if absent, its weight is redistributed
-    proportionally across the 8 core factors.
-    """
-    base = {
-        "pre-seed": _WEIGHTS_PRESEED,
-        "seed":     _WEIGHTS_SEED,
-        "unknown":  _WEIGHTS_UNKNOWN,
-    }.get(stage_label, _WEIGHTS_UNKNOWN).copy()
-
-    if has_investor_signal:
-        # Add investor signal at 7% and renormalize so total = 1.0
-        base["7"] = 0.07
-        total = sum(base.values())
-        return {k: round(v / total, 6) for k, v in base.items()}
-    else:
-        # No investor signal — weights already sum to ~0.93 (preseed) or ~0.93 (seed)
-        # Renormalize to 1.0 across the 8 core factors
-        total = sum(base.values())
-        return {k: round(v / total, 6) for k, v in base.items()}
 
 
 # ---------- Google Sheets client ----------
@@ -132,8 +94,11 @@ def passes_stage_gate(candidate: dict):
     stage = str(candidate.get("last_funding_round", "") or candidate.get("stage", "")).strip().lower()
     if not stage or stage in {"unknown", "none"}:
         funding = safe_float(candidate.get("total_funding_usd", 0))
-        if funding <= 3_000_000:
-            return True, "accepted (missing stage, low funding implies pre-seed)"
+        if 0 < funding <= 3_000_000:
+            return True, f"accepted (missing stage, funding ${funding:,.0f} implies pre-seed)"
+        if funding == 0:
+            # Zero could mean no data — pass with caution but funding gate will validate further
+            return True, "accepted (missing stage and funding data — funding gate will validate)"
         return False, f"stage missing, funding ${funding:,.0f} too high to assume pre-seed"
     for allowed in ALLOWED_STAGES:
         if allowed in stage:
@@ -143,6 +108,13 @@ def passes_stage_gate(candidate: dict):
 
 def passes_funding_gate(candidate: dict):
     total = safe_float(candidate.get("total_funding_usd", 0))
+    # If funding is 0 or missing, only pass if stage is explicitly pre-seed/seed
+    # to avoid letting well-funded companies through with blank Crustdata fields.
+    if total == 0:
+        stage = str(candidate.get("last_funding_round", "") or candidate.get("stage", "")).strip().lower()
+        if stage in {"pre-seed", "preseed", "seed", "angel", "grant", "accelerator", ""}:
+            return True, "funding $0 (missing data) — stage suggests pre-seed, passing with caution"
+        return False, f"funding $0 (missing data) and stage '{stage}' not pre-seed — likely data gap, rejecting"
     if total > MAX_TOTAL_FUNDING:
         return False, f"total funding ${total:,.0f} exceeds ${MAX_TOTAL_FUNDING:,.0f} cap"
     return True, f"funding ${total:,.0f} within cap"
@@ -169,35 +141,6 @@ def passes_all_gates(candidate: dict):
         if not ok:
             return False, reason
     return True, "all gates passed"
-
-
-def detect_stage(candidate: dict) -> str:
-    """
-    Classify a candidate as 'pre-seed', 'seed', or 'unknown'.
-    Uses round label first, falls back to funding amount heuristic.
-    """
-    raw = str(
-        candidate.get("last_funding_round", "") or candidate.get("stage", "")
-    ).strip().lower()
-
-    preseed_keywords = {"pre-seed", "preseed", "pre_seed", "angel", "friends and family"}
-    seed_keywords = {"seed"}
-
-    for kw in preseed_keywords:
-        if kw in raw:
-            return "pre-seed"
-    for kw in seed_keywords:
-        if kw in raw:
-            return "seed"
-
-    # Fall back to funding amount heuristic
-    funding = safe_float(candidate.get("total_funding_usd", 0))
-    if funding == 0 or funding <= 1_500_000:
-        return "pre-seed"
-    if funding <= 5_000_000:
-        return "seed"
-
-    return "unknown"
 
 
 # ---------- Second Layer thesis filter ----------
@@ -245,78 +188,43 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
 
 
 # ---------- 9-factor scoring ----------
-def _has_investor_signal(candidate: dict) -> bool:
-    """Return True if meaningful investor signal data is present."""
-    investors = str(candidate.get("investors", "") or candidate.get("lead_investor", "")).strip()
-    return bool(investors) and investors.lower() not in {"unknown", "none", "n/a", ""}
-
-
 def score_candidate(ai_client: Anthropic, candidate: dict, sl_reason: str):
-    stage_label = detect_stage(candidate)
-    has_investor = _has_investor_signal(candidate)
-    weights = _weights_for_stage(stage_label, has_investor)
-    threshold = MIN_SCORE_PCT[stage_label]
-
-    # Stage-specific scoring guidance injected into the prompt
-    stage_guidance = {
-        "pre-seed": (
-            "This is a PRE-SEED company. Prioritize founder quality, domain expertise, "
-            "and thesis/market conviction above all. Absence of revenue or named customers "
-            "is EXPECTED and must NOT penalize scores — judge whether early signals suggest "
-            "future PMF, not whether PMF exists today. Capital efficiency should reflect "
-            "lean operations, not growth metrics."
-        ),
-        "seed": (
-            "This is a SEED-stage company. Some early traction evidence is expected — "
-            "look for pilot customers, letters of intent, early revenue, or strong user "
-            "engagement signals. Absence of these is a meaningful negative signal at this stage."
-        ),
-        "unknown": (
-            "Stage is unclear. Apply moderate expectations: treat missing traction data "
-            "as a soft negative rather than a hard penalty."
-        ),
-    }.get(stage_label, "")
-
-    investor_instruction = (
-        "7. Investor Signal — score based on the quality and relevance of existing backers "
-        "(top-tier seed fund or domain-expert angel = 9-10; unknown angels = 5-6; no data = skip)."
-        if has_investor
-        else "Skip factor 7 — no investor data available; it will be excluded from scoring."
-    )
-
-    score_keys = list(weights.keys())
-    score_lines = "\n".join(f"{k}:N" for k in score_keys)
-
-    prompt = f"""Score this company on the Second Layer VC framework.
-
-{stage_guidance}
+    prompt = f"""Score this seed-stage company on 9 factors (1-10 each).
 
 Company: {candidate.get("name")}
 Description: {str(candidate.get("description", ""))}
-Stage: {stage_label} (raw: {candidate.get("last_funding_round", candidate.get("stage", "unknown"))})
-Total raised: ${safe_float(candidate.get("total_funding_usd", 0)):,.0f}
+Stage: {candidate.get("last_funding_round", candidate.get("stage", "unknown"))}
+Total raised: ${safe_float(candidate.get('total_funding_usd', 0)):,.0f}
 Headcount: {candidate.get("headcount", "unknown")}
 Founded: {candidate.get("founded_date", "unknown")}
 HQ: {candidate.get("hq_city", "")}, {candidate.get("hq_country", "")}
-Investors: {candidate.get("investors", candidate.get("lead_investor", "none"))}
 Second Layer assessment: {sl_reason}
 
 Score 1-10 (10=exceptional, 5=average, 1=weak):
-1A. Founder-Market Fit — deep domain expertise and relevant background
-1B. Tech Differentiation — defensibility, proprietary approach
-1C. Founder Commitment — full-time, skin in the game
-2A. Early PMF — user obsession, retention, or validated problem (weight expectation varies by stage)
-3A. Market Size — TAM >$1B for full marks
-3B. Timing — regulatory/structural tailwinds, competition beatable
-5. Traction Quality — named pilots, contracts, or qualitative proof points
-6. Capital Efficiency — right burn for stage, lean operations
-{investor_instruction}
+1A. Founder-Market Fit
+1B. Tech Differentiation
+1C. Founder Commitment
+2A. Product-Market Fit
+3A. Market Size (TAM >$1B for max)
+3B. Timing (tailwinds)
+5. Traction Quality (named pilots/contracts)
+6. Capital Efficiency (right burn for stage)
+7. Investor Signal
 
-Format EXACTLY (include only factors listed above):
-{score_lines}
+Format EXACTLY:
+1A:N
+1B:N
+1C:N
+2A:N
+3A:N
+3B:N
+5:N
+6:N
+7:N
 SUMMARY:one-sentence overall
 STRENGTHS:primary strength (<=25 words)
-RISKS:primary risk (<=25 words)"""
+RISKS:primary risk (<=25 words)
+FOUNDERS:Founder name(s), title(s), and prior background in <=40 words"""
 
     try:
         response = ai_client.messages.create(
@@ -326,7 +234,7 @@ RISKS:primary risk (<=25 words)"""
         )
         text = response.content[0].text.strip()
         scores = {}
-        meta = {"summary": "", "strengths": "", "risks": ""}
+        meta = {"summary": "", "strengths": "", "risks": "", "founders": ""}
 
         for line in text.split("\n"):
             line = line.strip()
@@ -335,9 +243,9 @@ RISKS:primary risk (<=25 words)"""
             key, _, val = line.partition(":")
             key = key.strip()
             val = val.strip()
-            if key in score_keys:
+            if key in {"1A", "1B", "1C", "2A", "3A", "3B", "5", "6", "7"}:
                 try:
-                    digits = "".join(c for c in val if c.isdigit())[:2]
+                    digits = ''.join(c for c in val if c.isdigit())[:2]
                     scores[key] = int(digits) if digits else 5
                 except ValueError:
                     scores[key] = 5
@@ -347,61 +255,44 @@ RISKS:primary risk (<=25 words)"""
                 meta["strengths"] = val
             elif key.upper() == "RISKS":
                 meta["risks"] = val
+            elif key.upper() == "FOUNDERS":
+                meta["founders"] = val
 
-        # Weighted score using stage + investor-adjusted weights
-        weighted = sum(scores.get(f, 5) * w for f, w in weights.items())
+        weighted = 0.0
+        for factor, weight in FACTOR_WEIGHTS.items():
+            weighted += scores.get(factor, 5) * weight
         pct = round(weighted * 10, 1)
 
         return {
             "scores": scores,
             "weighted_pct": pct,
-            "stage_label": stage_label,
-            "threshold": threshold,
             "summary": meta["summary"],
             "strengths": meta["strengths"],
             "risks": meta["risks"],
+            "founders": meta["founders"],
         }
     except Exception as e:
         print(f"    Scoring error for {candidate.get('name')}: {e}")
-        return {
-            "scores": {}, "weighted_pct": 0, "stage_label": stage_label,
-            "threshold": threshold, "summary": "", "strengths": "", "risks": f"Error: {e}",
-        }
+        return {"scores": {}, "weighted_pct": 0, "summary": "", "strengths": "", "risks": f"Error: {e}", "founders": ""}
 
 
-def decision_from_score(pct: float, stage_label: str = "unknown") -> str:
-    """
-    Stage-aware decision thresholds.
-    Pre-seed companies are judged against a lower bar since traction factors
-    are structurally unavailable — a strong pre-seed at 62% outranks a weak
-    seed at 62%.
-    """
-    if stage_label == "pre-seed":
-        if pct >= 80:
-            return "★★★★★ STRONG YES"
-        if pct >= 70:
-            return "★★★★ YES"
-        if pct >= 55:
-            return "★★★ DEEP DIVE"
-        if pct >= 45:
-            return "★★ PROBABLY PASS"
-        return "★ HARD PASS"
-    else:  # seed or unknown
-        if pct >= 85:
-            return "★★★★★ STRONG YES"
-        if pct >= 75:
-            return "★★★★ YES"
-        if pct >= 65:
-            return "★★★ DEEP DIVE"
-        if pct >= 55:
-            return "★★ PROBABLY PASS"
-        return "★ HARD PASS"
+def decision_from_score(pct: float) -> str:
+    if pct >= 85:
+        return "★★★★★ STRONG YES"
+    if pct >= 75:
+        return "★★★★ YES"
+    if pct >= 65:
+        return "★★★ DEEP DIVE"
+    if pct >= 55:
+        return "★★ PROBABLY PASS"
+    return "★ HARD PASS"
 
 
 # ---------- Sheet writers ----------
 PIPELINE_HEADERS = [
-    "Date", "Company", "Stage", "Stage Label", "Threshold %", "Total Raised", "Vertical", "Source",
+    "Date", "Company", "Stage", "Total Raised", "Vertical", "Source",
     "Second Layer Logic", "Description", "Passed Gates",
+    "Founders",
     "1A_FMF", "1B_Tech", "1C_Commit", "2A_PMF", "3A_TAM", "3B_Timing",
     "5_TrxQl", "6_CapEff", "7_Investor",
     "Weighted %", "Decision", "Summary", "Strengths", "Risks",
@@ -440,20 +331,17 @@ def write_scored_candidates(client, tab_name: str, scored: list, vertical_label:
     for c in scored:
         cand = c["candidate"]
         s = c.get("scores", {})
-        stage_label = c.get("stage_label", "unknown")
-        threshold = c.get("threshold", MIN_SCORE_PCT["unknown"])
         rows.append([
             now,
             cand.get("name", ""),
             cand.get("last_funding_round", cand.get("stage", "")),
-            stage_label,
-            threshold,
             safe_float(cand.get("total_funding_usd", 0)),
             vertical_label or cand.get("industry", ""),
             cand.get("_source", "Crustdata"),
             c.get("sl_reason", ""),
             str(cand.get("description", ""))[:400],
             "Yes",
+            c.get("founders", ""),
             s.get("1A", ""), s.get("1B", ""), s.get("1C", ""),
             s.get("2A", ""), s.get("3A", ""), s.get("3B", ""),
             s.get("5", ""), s.get("6", ""), s.get("7", ""),
