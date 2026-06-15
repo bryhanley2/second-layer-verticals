@@ -8,29 +8,59 @@ An automated sourcing and scoring system for seed-stage companies aligned with t
 
 > "Every dominant trend creates a second-order problem. We invest in the companies that solve it."
 
-| Layer | Example |
-|-------|---------|
-| **First Layer** | AI adoption explodes across enterprise |
-| **Second Layer** | Governance gap, regulatory liability, and model drift → AI governance and validation platforms |
+The Second Layer Approach seeks to identify the "yet to be understood" impacts of dominant industry trends, pinpointing areas of both opportunity and risk where investors should be focusing today.
 
-The pipeline identifies companies where a structural, technology, or regulatory shift has created a **new, unavoidable problem** — and a founder has built the infrastructure layer to solve it.
+| Step | Track | Description |
+|------|-------|-------------|
+| **1. Observe** | — | Identify dominant and fastest-growing industries |
+| **2. Question** | **Opportunity (2a)** | What growth do they enable? |
+| | **Risk (2b)** | What problems do they cause? |
+| **3. Invest** | **Supplement (3a)** | Solutions that accelerate 2a growth |
+| | **Mitigate (3b)** | Solutions that reduce risk from 2b |
 
 ---
 
-## Verticals (V0–V9)
+## Verticals (V0–V19)
 
-| ID | Vertical | Dominant Trend | Second Layer Logic |
-|----|----------|----------------|--------------------|
-| **V0** | Energy, Climate & Sustainability | Energy transition and ESG regulatory expansion | The shift to renewables created grid complexity and carbon accounting mandates → ESG reporting automation, grid intelligence, clean energy operations software, and EV infrastructure became essential |
-| **V1** | Data Privacy, Governance & Compliance | Data broker proliferation and regulatory expansion | 750+ data brokers openly trade personal data → GDPR, CCPA, CPRA, and expanding state privacy laws created compliance mandates → consumer data removal, PII engineering, and enterprise consent infrastructure became required |
-| **V2** | Fintech, Payments & Financial Compliance | Global fintech and payments expansion | Fintech expanded financial access globally → regulatory burden grew proportionally → AML, KYC/KYB, sanctions screening, fraud prevention, and financial crime compliance became mandatory bottlenecks for every fintech and bank |
-| **V3** | Space, Ocean Tech & Navigation | Commercial satellite and maritime proliferation | SpaceX drove launch costs down 95% → thousands of satellites in orbit, commercial maritime automation expanding → demand for earth observation intelligence, space cybersecurity, autonomous navigation, ground segment software, and space traffic management |
-| **V4** | AI Governance, Safety & Responsible AI | Enterprise AI adoption at scale | 61% of VC went to AI in 2025 → enterprises deploying models at scale → governance gap, regulatory liability, bias drift, and LLM safety risk → AI governance, model validation, and responsible AI platforms |
-| **V5** | Biotech, Medtech & Life Sciences | Healthcare digitization and FDA regulatory expansion | Healthcare AI and EHR proliferation created new clinical data pipelines → HIPAA complexity, FDA software regulation, and clinical trial digitization created compliance and validation bottlenecks → medtech software, clinical AI, and biotech ops platforms |
-| **V6** | Supply Chain, Logistics & Legal Tech | Open source adoption and legal AI proliferation | Open source became ubiquitous → Log4Shell and SolarWinds proved supply chain risk → SBOM compliance, dependency scanning, and supply chain security became regulatory requirements. Simultaneously, legal AI made drafting accessible to non-lawyers → malpractice and compliance risk grew → contract intelligence and compliance-grade legal workflows became essential |
-| **V7** | Cybersecurity, Infrastructure & Operations | Cloud adoption explosion | Cloud created multi-cloud complexity and expanding attack surfaces → CSPM, DevSecOps, SOC automation, supply chain security, and identity security became essential infrastructure for every enterprise |
-| **V8** | Insurance, Risk Management & Real Estate | Digital transformation of financial and physical assets | Insurance digitization and construction tech adoption created new underwriting data and project complexity → claims automation, AI underwriting, construction permitting, and real estate risk platforms emerged as essential infrastructure |
-| **V9** | Healthcare, Interoperability & Agtech | Healthcare digitization and food supply chain expansion | Healthcare digitized rapidly → EHR fragmentation and administrative burden grew → care navigation, prior authorization, billing, and interoperability became unsustainable bottlenecks. Simultaneously, global food supply chain complexity created demand for agtech, traceability, and food safety compliance platforms |
+### Original Verticals (V0–V5)
+
+| ID | Vertical | Second Layer Logic |
+|----|----------|--------------------|
+| **V0** | Energy, Climate & Sustainability Tech | Renewable buildout + AI data center demand created site selection, interconnection, and financing bottlenecks that block deployment |
+| **V1** | Data Privacy, Governance & Compliance | GDPR, state privacy laws, and enterprise data sprawl created compliance burden no internal team can manage manually |
+| **V2** | Fintech, Payments & Financial Compliance | Fintech and crypto proliferation created AML, KYC, and sanctions compliance obligations every new platform must meet on day one |
+| **V3** | Space, Ocean Tech & Advanced Navigation | Satellite cost collapse created orbital congestion, maritime detection gaps, and traffic management problems no legacy system was built for |
+| **V4** | AI Governance, Safety & Responsible AI | Enterprise LLM adoption created evaluation, monitoring, and audit obligations no traditional QA tool addresses |
+| **V5** | Biotech, Medtech & Life Sciences Compliance | FDA digitization and clinical AI adoption created regulatory documentation and validation workflows legacy CROs cannot scale |
+
+### Split Verticals (V6–V11)
+
+| ID | Vertical | Second Layer Logic |
+|----|----------|--------------------|
+| **V6** | Supply Chain & Logistics | Reshoring, tariff volatility, and SBOM mandates created visibility and traceability requirements legacy ERPs cannot meet |
+| **V7** | Legal Tech & Contract Intelligence | Enterprise AI adoption and contract velocity created review and litigation workflows law firms cannot staff manually |
+| **V8** | Cybersecurity, Infrastructure & Operations | Cloud sprawl and AI-amplified threats created detection and response loads that overwhelm legacy SOC tools |
+| **V9** | Insurance, Risk Management & Real Estate Tech | Climate risk, AI underwriting data, and construction tech adoption created risk modeling needs traditional insurers cannot price |
+| **V10** | Healthcare & Interoperability | Medicare Advantage expansion and EHR fragmentation created navigation, prior authorization, and care coordination crises |
+| **V11** | Agtech & Food Systems | Climate volatility, food traceability mandates, and precision agriculture data created tooling gaps small operators cannot bridge |
+
+### AI Second Layer Verticals (V12–V15)
+
+| ID | Vertical | Second Layer Logic |
+|----|----------|--------------------|
+| **V12** | AI Security, Red-Teaming & Content Authenticity | Enterprise LLM deployment and deepfake proliferation created model security and content provenance requirements |
+| **V13** | AI Agent Infrastructure & Tooling | Agentic AI adoption created authentication, payments, orchestration, and tool-calling bottlenecks |
+| **V14** | AI Compute, Energy & Data Center Infrastructure | AI compute demand exploded faster than data center cooling, grid interconnection, and inference efficiency could scale |
+| **V15** | Workforce Transition & AI-Augmented Services | AI adoption disrupted services labor markets faster than reskilling and copilot infrastructure could respond |
+
+### Net-New Verticals (V16–V19)
+
+| ID | Vertical | Second Layer Logic |
+|----|----------|--------------------|
+| **V16** | Defense, Dual-Use & Export Compliance | Defense tech boom created ITAR, CMMC, and supply chain security requirements dual-use startups are structurally unequipped to handle |
+| **V17** | Robotics & Physical Automation Enablement | Humanoid and warehouse robotics deployment created integration, orchestration, certification, and insurance gaps |
+| **V18** | Aging Economy & Elder Care Infrastructure | Aging demographics and Medicare Advantage growth created care coordination and benefits navigation crises |
+| **V19** | Post-Quantum Security & Cryptographic Migration | NIST PQC standards and federal migration mandates created mandatory cryptographic inventory and migration work |
 
 ---
 
@@ -43,19 +73,20 @@ The pipeline identifies companies where a structural, technology, or regulatory 
 | YC Companies (yc-oss API) | Per run | Recent batches (W23–S26) | High — curated founders |
 | SEC Form D Filings | Per run | Keyword-matched | High — legally-mandated raise signal |
 | TechCrunch | Per run | Keyword-matched | Medium — funding coverage |
+| SBIR/STTR Awards | Per run | AI-filtered | High — pre-VC government grant signal |
+| Hugging Face Trending | Per run | Big labs filtered out | Medium — pre-funding AI startup signal |
+| Product Hunt | Per run | Daily leaders | Medium — launch-day product signal |
 | HN Show HN | Per run | ~100 posts | Low — filter heavy |
 | RSS Funding Feeds | Per run | 3–5 seed matches | Medium — funding signal |
 | Claude Research | Per run | 6–8 candidates | High — framework-aligned |
 
-> **Note:** Crustdata was removed as a source in June 2026 due to API credit costs on the pay-as-you-go plan. The pipeline now relies entirely on free sources (YC, SEC EDGAR, RSS, TechCrunch) plus Claude Research.
-
-### Vertical Pipeline Sources (V0–V9)
+### Vertical Pipeline Sources (V0–V19)
 
 The vertical pipeline runs per-vertical and uses five free sources, each filtered by the vertical's keywords:
 
 | Source | How it's filtered | Notes |
 |--------|-------------------|-------|
-| YC Companies | Vertical keywords matched against company text | Replaces Crustdata; recent batches only |
+| YC Companies | Vertical keywords matched against company text | Recent batches only |
 | SEC Form D | Vertical keywords as full-text search query | Catches raises with no press coverage |
 | TechCrunch | Vertical keywords + seed-stage terms | Venture/startups/seed-funding feeds |
 | Vertical RSS | Sector-specific publications | 2–3 feeds per vertical |
@@ -63,10 +94,23 @@ The vertical pipeline runs per-vertical and uses five free sources, each filtere
 
 All candidates pass a **funding verification step** (Claude fills in funding/stage for $0 candidates) before the three hard gates run.
 
-
 ### Scoring
 
-All candidates are scored against the **11-Factor Second Layer Framework**:
+#### 9-Factor Framework (Vertical Pipeline / Medtech / Hardware)
+
+| # | Factor | Weight |
+|---|--------|--------|
+| 1A | Founder-Market Fit | 14% |
+| 1B | Technical Differentiation | 11% |
+| 1C | Founder Commitment | 10% |
+| 2A | Product-Market Fit | 15% |
+| 3A | Market Size (TAM) | 12% |
+| 3B | Timing & Competition | 11% |
+| 5 | Traction Quality | 10% |
+| 6 | Capital Efficiency | 10% |
+| 7 | Investor Signal | 7% |
+
+#### 11-Factor Framework (Main Pipeline / SaaS / Fintech)
 
 | # | Factor | Weight |
 |---|--------|--------|
@@ -82,7 +126,7 @@ All candidates are scored against the **11-Factor Second Layer Framework**:
 | 6 | Capital Efficiency | 10% |
 | 7 | Investor Signal | 10% |
 
-**Minimum score threshold: 65%**
+**Minimum score thresholds:** Pre-seed: 55% | Seed: 65% | Unknown: 60%
 
 ### Hard Gates (applied before scoring)
 
@@ -100,13 +144,19 @@ All three must pass or the company is excluded:
 
 | Tab | Contents |
 |-----|----------|
-| Pipeline | All candidates scoring ≥ 65% from main pipeline runs |
-| Vertical Pipeline | Candidates scoring ≥ 65% organized by vertical (V0–V9) |
+| Pipeline | All candidates scoring above threshold from main pipeline runs |
+| Vertical Pipeline | Candidates organized by vertical (V0–V19) |
+| Vertical Reference | V0–V19 schema reference with Second Layer logic and example companies |
 | Founder Pipeline | Direct founder sourcing and outreach tracking |
-| Crustdata Cache - Main | Raw Crustdata output (75 companies/week) |
 | Pipeline Archive | Historical pipeline runs |
 | Company Pipeline | Extended company tracking |
 | Empty (copy paste) | Template tab |
+
+### Pipeline Headers (26 columns)
+
+```
+Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic | Description | Passed Gates | Founders | 1A_FMF | 1B_Tech | 1C_Commit | 2A_PMF | 3A_TAM | 3B_Timing | 5_TrxQl | 6_CapEff | 7_Investor | Weighted % | Decision | Summary | Strengths | Risks | Website | LinkedIn
+```
 
 ---
 
@@ -115,8 +165,8 @@ All three must pass or the company is excluded:
 | Workflow | File | Schedule | Trigger |
 |----------|------|----------|---------|
 | Main Pipeline | `main_pipeline.yml` | Daily 12:00 UTC | Cron + manual |
-| Crustdata Refresh | `crustdata_refresh.py` | Weekly | Cron |
-| Test Sources | `test_sources.yml` | Manual | GitHub Actions |
+| Vertical Pipeline | `vertical_pipeline.yml` | Daily 13:00 UTC | Cron + manual (index 0–19) |
+| Test APIs | `test_apis.yml` | Manual | GitHub Actions |
 
 ---
 
@@ -124,15 +174,16 @@ All three must pass or the company is excluded:
 
 ```
 /
-├── sourcer.py              # Main sourcing logic (all sources)
-├── pipeline_utils.py       # Scoring, filtering, sheet writing
-├── crustdata_refresh.py    # Weekly Crustdata cache refresh
-├── test_sources.py         # Source verification (no API keys needed)
+├── sourcer.py              # Main sourcing logic (YC, SEC, TechCrunch, SBIR, HF, PH, HN, RSS, Claude)
+├── vertical_pipeline.py    # Vertical pipeline runner (5 sources per vertical)
+├── vertical_sources.py     # V0–V19 vertical schema (keywords, RSS feeds, search terms)
+├── pipeline_utils.py       # Scoring, gates, sheet writing, funding verification
+├── test_apis.py            # API credential diagnostic
 ├── .github/
 │   └── workflows/
 │       ├── main_pipeline.yml
-│       ├── crustdata_refresh.yml
-│       └── test_sources.yml
+│       ├── vertical_pipeline.yml
+│       └── test_apis.yml
 └── README.md
 ```
 
@@ -147,8 +198,6 @@ All three must pass or the company is excluded:
 | `GOOGLE_SHEET_ID` | Target sheet |
 | `GITHUB_TOKEN` | GitHub search source (optional) |
 
-> `CRUSTDATA_API_KEY` is no longer required — Crustdata was removed in June 2026.
-
 ---
 
 ## Current Source Status
@@ -156,12 +205,15 @@ All three must pass or the company is excluded:
 | Source | Status | Notes |
 |--------|--------|-------|
 | YC Companies | ✅ Working | yc-oss all.json filtered by vertical keywords + batch |
-| SEC Form D | ✅ Working | EDGAR full-text search, no API key needed, requires User-Agent |
-| TechCrunch | ✅ Working | Venture/startups/seed-funding feeds, keyword-filtered |
+| SEC Form D | ✅ Working | EDGAR full-text search, no API key needed |
+| TechCrunch | ✅ Working | Venture/startups/seed-funding feeds |
+| SBIR/STTR | ✅ New | Government grant signal, keyword-filtered |
+| Hugging Face | ✅ New | Trending AI orgs, big labs filtered out |
+| Product Hunt | ✅ New | Daily leaders via RSS |
 | RSS Funding | ✅ Working | 2–3 sector feeds per vertical |
 | Claude Research | ✅ Working | 6–8 high-quality candidates/run |
-| HN Show | ✅ Working | Main pipeline only, low quality, filter heavy |
-| Crustdata | ❌ Removed | Retired June 2026 — pay-as-you-go credit cost |
+| HN Show | ✅ Working | Main pipeline only |
+| Crustdata | ❌ Removed | Retired June 2026 |
 | GitHub Search | ⚠️ Skipped | Requires GITHUB_TOKEN secret |
 
 ---
