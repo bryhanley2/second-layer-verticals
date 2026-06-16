@@ -242,6 +242,26 @@ VERTICALS = [
             "cryptographic inventory discovery startup seed funding",
         ],
     },
+    {
+        # V20 — Consumer health/wellness brands (CPG-specific sourcing)
+        "id": 20,
+        "name": "Consumer Health & Wellness Brands",
+        "keywords": ["functional food", "functional beverage", "better for you", "protein snack", "prebiotic", "probiotic", "adaptogen", "clean label", "plant based", "gut health", "wellness", "superfood", "non-alcoholic", "sugar free", "gluten free"],
+        "rss_feeds": [
+            "https://www.foodnavigator-usa.com/rssfeed",
+            "https://www.bevnet.com/news/feed/",
+            "https://www.nosh.com/feed/",
+            "https://www.beautyindependent.com/feed/",
+            "https://www.fooddive.com/feeds/news/",
+        ],
+        "search_terms": [
+            "functional snack brand seed funding raised 2026",
+            "better-for-you consumer brand seed round food beverage 2025 2026",
+            "clean label wellness brand seed funding raised",
+            "non-alcoholic beverage startup seed round raised",
+            "protein snack brand bootstrapped raising seed round",
+        ],
+    },
 ]
 
 
