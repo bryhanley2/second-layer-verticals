@@ -20,7 +20,7 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 
 ---
 
-## Verticals (V0–V19)
+## Verticals (V0–V20)
 
 ### Original Verticals (V0–V5)
 
@@ -62,6 +62,12 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 | **V18** | Aging Economy & Elder Care Infrastructure | Aging demographics and Medicare Advantage growth created care coordination and benefits navigation crises |
 | **V19** | Post-Quantum Security & Cryptographic Migration | NIST PQC standards and federal migration mandates created mandatory cryptographic inventory and migration work |
 
+### Consumer Vertical (V20)
+
+| ID | Vertical | Second Layer Logic |
+|----|----------|--------------------|
+| **V20** | Consumer Health & Wellness Brands | Health/wellness trend and functional food movement created consumer demand for better-for-you alternatives in legacy indulgence categories (snacking, beverages, personal care) that incumbents are structurally slow to serve |
+
 ---
 
 ## Pipeline Architecture
@@ -80,7 +86,7 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 | RSS Funding Feeds | Per run | 3–5 seed matches | Medium — funding signal |
 | Claude Research | Per run | 6–8 candidates | High — framework-aligned |
 
-### Vertical Pipeline Sources (V0–V19)
+### Vertical Pipeline Sources (V0–V20)
 
 The vertical pipeline runs per-vertical and uses five free sources, each filtered by the vertical's keywords:
 
@@ -89,8 +95,10 @@ The vertical pipeline runs per-vertical and uses five free sources, each filtere
 | YC Companies | Vertical keywords matched against company text | Recent batches only |
 | SEC Form D | Vertical keywords as full-text search query | Catches raises with no press coverage |
 | TechCrunch | Vertical keywords + seed-stage terms | Venture/startups/seed-funding feeds |
-| Vertical RSS | Sector-specific publications | 2–3 feeds per vertical |
+| Vertical RSS | Sector-specific publications | 2–5 feeds per vertical |
 | Claude Research | Vertical-specific search terms | Highest framework alignment |
+
+> **Note on V20 (Consumer Health & Wellness Brands):** This vertical sources primarily through CPG-specific RSS feeds (FoodNavigator-USA, BevNET, Nosh, Beauty Independent, Food Dive) and Claude Research. YC, SEC Form D, and SBIR sources contribute minimally for consumer brands but do not require separate infrastructure.
 
 All candidates pass a **funding verification step** (Claude fills in funding/stage for $0 candidates) before the three hard gates run.
 
@@ -145,8 +153,8 @@ All three must pass or the company is excluded:
 | Tab | Contents |
 |-----|----------|
 | Pipeline | All candidates scoring above threshold from main pipeline runs |
-| Vertical Pipeline | Candidates organized by vertical (V0–V19) |
-| Vertical Reference | V0–V19 schema reference with Second Layer logic and example companies |
+| Vertical Pipeline | Candidates organized by vertical (V0–V20) |
+| Vertical Reference | V0–V20 schema reference with Second Layer logic and example companies |
 | Founder Pipeline | Direct founder sourcing and outreach tracking |
 | Pipeline Archive | Historical pipeline runs |
 | Company Pipeline | Extended company tracking |
@@ -165,7 +173,7 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 | Workflow | File | Schedule | Trigger |
 |----------|------|----------|---------|
 | Main Pipeline | `main_pipeline.yml` | Daily 12:00 UTC | Cron + manual |
-| Vertical Pipeline | `vertical_pipeline.yml` | Daily 13:00 UTC | Cron + manual (index 0–19) |
+| Vertical Pipeline | `vertical_pipeline.yml` | Daily 13:00 UTC | Cron + manual (index 0–20) |
 | Test APIs | `test_apis.yml` | Manual | GitHub Actions |
 
 ---
@@ -176,7 +184,7 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 /
 ├── sourcer.py              # Main sourcing logic (YC, SEC, TechCrunch, SBIR, HF, PH, HN, RSS, Claude)
 ├── vertical_pipeline.py    # Vertical pipeline runner (5 sources per vertical)
-├── vertical_sources.py     # V0–V19 vertical schema (keywords, RSS feeds, search terms)
+├── vertical_sources.py     # V0–V20 vertical schema (keywords, RSS feeds, search terms)
 ├── pipeline_utils.py       # Scoring, gates, sheet writing, funding verification
 ├── test_apis.py            # API credential diagnostic
 ├── .github/
