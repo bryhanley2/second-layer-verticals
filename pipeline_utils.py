@@ -224,7 +224,7 @@ Format EXACTLY:
 SUMMARY:one-sentence overall
 STRENGTHS:primary strength (<=25 words)
 RISKS:primary risk (<=25 words)
-FOUNDERS:Founder name(s), title(s), and prior background in <=40 words"""
+FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL: If you do not know the specific founder names from a verifiable source, write "UNVERIFIED — needs manual lookup" instead of guessing. NEVER fabricate names like "Eric Ness" when the actual co-founder is "Eric Ryan". NEVER complete the pattern of a plausible-sounding bio. If uncertain about ANY founder, mark the whole field UNVERIFIED."""
 
     try:
         response = ai_client.messages.create(
