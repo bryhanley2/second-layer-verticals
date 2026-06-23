@@ -2,8 +2,7 @@ name: Vertical Pipeline
 
 on:
   schedule:
-    # Daily at 8am EST (1pm UTC) — rotates through verticals by day of year
-    - cron: '0 13 * * *'
+    - cron: '30 10 * * *'
   workflow_dispatch:
     inputs:
       vertical_index:
