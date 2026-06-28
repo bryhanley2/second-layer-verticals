@@ -424,20 +424,31 @@ def verify_zero_funding(ai_client, candidates: list) -> None:
 
     # ----- Pass 2: Claude verification with strict source-citation rule -----
     names = [c["name"] for c in still_unknown][:40]
-    prompt = f"""You are verifying funding data for the seed-stage startups below.
+    prompt = f"""You are verifying funding and team data for the seed-stage startups below.
 DO NOT estimate. DO NOT extrapolate from similar companies. DO NOT use general knowledge.
-Only return numbers if you can cite a specific source.
+DO NOT fabricate founder names — this is a CRITICAL anti-hallucination rule.
+Only return data you can cite a specific source for.
+
+EXAMPLES OF PROHIBITED FABRICATION:
+- Inventing plausible-sounding co-founder names (e.g. "Eric Ness" when the actual co-founder is "Eric Ryan")
+- Inventing founder backgrounds (e.g. "ex-AWS/Capgemini" when actually ex-Google/Microsoft)
+- Completing the pattern of a founder bio when source data is thin
+- Pattern-matching common Silicon Valley names ("Smith, Chen, Patel, etc.")
+
+If you do not know a founder's name or background from a specific source you can cite,
+return null. NEVER guess. NEVER fabricate.
 
 For each company, return JSON with these fields:
 - total_funding_usd: integer dollar amount, ONLY if you can cite a specific source. Otherwise null.
 - last_round_type: the EXACT round name as reported (Pre-seed / Seed / Seed Extension / Series A / Series B / Grant / etc.). Otherwise null.
 - last_funding_date: YYYY-MM-DD format if known, otherwise null.
 - founded_year: YYYY if known from a specific source, otherwise null.
-- source_citation: URL or specific reference (e.g. "TechCrunch Jun 2024 announcement", "SEC Form D filed 2024-03-15").
+- founders: array of objects [{{"name": "Full Name", "role": "CEO/CTO/etc.", "background_source": "URL or citation"}}] — ONLY include founders you can verify by name and role from a specific source. If any founder name is uncertain, OMIT THEM ENTIRELY rather than guessing. Empty array if no founders can be verified.
+- source_citation: URL or specific reference (e.g. "TechCrunch Jun 2024 announcement", "SEC Form D filed 2024-03-15", "Crunchbase profile").
 - confidence: "high" (multiple primary sources agree), "medium" (single primary source like a press release or SEC filing), "low" (general knowledge only, NO specific source), or "unverified" (cannot find).
 
-CRITICAL: If confidence would be "low" or "unverified", set total_funding_usd to null.
-Better to return null than to estimate.
+CRITICAL: If confidence would be "low" or "unverified", set total_funding_usd to null AND founders to [].
+Better to return null and empty than to estimate or fabricate.
 
 Companies: {json.dumps(names)}
 
@@ -470,6 +481,19 @@ Return ONLY a JSON object mapping company name to the fields above. No preamble.
                 c["last_funding_date"] = info["last_funding_date"]
             if info.get("founded_year"):
                 c["founded_year"] = info["founded_year"]
+            # Founders: overwrite ONLY if Claude returned verified founders with citations.
+            # If founders array is empty or missing, leave existing data alone (don't blank it out).
+            founders_list = info.get("founders") or []
+            if founders_list and isinstance(founders_list, list):
+                # Format as readable string for sheet column; preserve source citations
+                founder_str = "; ".join(
+                    f"{f.get('name', '?')} ({f.get('role', 'co-founder')})"
+                    for f in founders_list if f.get("name")
+                )
+                if founder_str:
+                    c["founders"] = founder_str
+                    c["_founders_verified"] = True
+                    c["_founders_sources"] = [f.get("background_source", "") for f in founders_list]
             c["_funding_confidence"] = confidence or "medium"
             c["_funding_source"] = info.get("source_citation") or "Claude verified"
         print(f"[Funding verify] Claude: {updated} verified, {unverified_count} flagged as unverified")
@@ -495,6 +519,76 @@ def deduplicate(candidates: list, existing_names: set) -> list:
 # ============================================================================
 # Main
 # ============================================================================
+def evaluate_consumer_second_layer_fit(ai_client, candidate: dict):
+    """
+    Consumer-specific Second Layer evaluator for V20 (Consumer Health & Wellness Brands).
+    Same 1-3 scoring scale as the B2B version, but reframes Second Layer logic for consumer.
+
+    Consumer Second Layer = the company offers a better-for-you alternative in a legacy
+    indulgence/consumer category where dominant trends (AI-enabled health awareness, wellness
+    movement, functional ingredient adoption) have shifted consumer demand faster than
+    incumbents can serve it.
+
+    Examples:
+      - Dominant trend: AI-driven health awareness + wellness movement
+        Second Layer: functional protein chocolate (DEFI Snacks) disrupting $22B chocolate category
+      - Dominant trend: sober-curious movement
+        Second Layer: non-alcoholic adaptogen apéritifs (De Soi)
+      - FAILS: another energy drink, another protein bar, another supplement — categories
+        already commoditized rather than truly shifted by the trend
+    """
+    prompt = f"""Evaluate consumer Second Layer fit for this brand.
+
+CONSUMER SECOND LAYER = the brand offers a better-for-you / cleaner-label / functional
+alternative in a legacy indulgence category (snacking, beverages, personal care, household)
+where consumer demand has shifted faster than incumbents can serve it.
+
+The dominant trend is: AI-driven health awareness + wellness movement + functional ingredient
+adoption. Better-for-you consumer products are the Second Layer response.
+
+Strong consumer Second Layer examples:
+- DEFI Snacks (functional protein chocolate disrupting $22B chocolate category)
+- OLIPOP (prebiotic soda displacing legacy soda)
+- De Soi (NA adaptogen apéritifs in the sober-curious movement)
+- Hanni (clean personal care for underserved demographics)
+
+FAILS Second Layer (commodity, not shifted):
+- Another generic protein bar, energy drink, or supplement in already-commoditized categories
+- A traditional CPG brand without a functional / clean-label / category-disruption angle
+- B2B SaaS or infrastructure (this is a consumer vertical — should not appear here)
+
+Rate 1-3:
+1 = Fails (commodity product, no category-shift logic, or wrong category entirely)
+2 = Borderline (some functional/clean-label angle but unclear differentiation)
+3 = Strong consumer Second Layer fit (genuine category disruption with proven trend tailwind)
+
+Company: {candidate.get("name", "")}
+Description: {str(candidate.get("description", ""))[:500]}
+
+Return ONLY: SCORE: N | REASON: one short sentence"""
+    try:
+        resp = ai_client.messages.create(
+            model="claude-opus-4-7", max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text.strip()
+        score = 2
+        reason = ""
+        for line in text.replace("|", "\n").split("\n"):
+            line = line.strip()
+            if line.upper().startswith("SCORE:"):
+                try:
+                    score = int(line.split(":", 1)[1].strip()[0])
+                except Exception:
+                    pass
+            elif line.upper().startswith("REASON:"):
+                reason = line.split(":", 1)[1].strip()
+        return max(1, min(3, score)), reason or "consumer eval no reason"
+    except Exception as e:
+        print(f"    Consumer Second Layer eval error for {candidate.get('name')}: {e}")
+        return 2, "consumer eval error, defaulted to borderline"
+
+
 def main():
     override = os.environ.get("VERTICAL_INDEX", "")
     if override.strip():
@@ -547,15 +641,31 @@ def main():
     print(f"Passed gates: {len(passed)} / {len(candidates)}")
 
     # Step 4: Second Layer thesis filter
+    # V20 (Consumer Health & Wellness Brands) uses a different logic than B2B verticals.
+    # Consumer brands don't solve infrastructure problems — they offer alternatives in
+    # categories where consumer awareness has shifted (e.g. health/wellness trend creates
+    # demand for better-for-you alternatives in legacy indulgence categories).
+    # Set SKIP_SECOND_LAYER_FOR_V20 = True to bypass the filter entirely for consumer.
+    SKIP_SECOND_LAYER_FOR_V20 = False  # change to True to skip filter for V20 entirely
     print(f"\nSTEP 3: Second Layer filter")
     print("-" * 60)
     passed_sl = []
-    for c in passed:
-        sl_score, sl_reason = evaluate_second_layer_fit(ai_client, c)
-        if sl_score < 2:
-            continue
-        c["_sl_reason"] = sl_reason
-        passed_sl.append(c)
+    is_consumer_vertical = (vertical_id == 20)
+    if is_consumer_vertical and SKIP_SECOND_LAYER_FOR_V20:
+        print("Vertical 20 (Consumer): skipping Second Layer filter entirely")
+        for c in passed:
+            c["_sl_reason"] = "Consumer vertical — filter skipped, see vertical-specific thesis"
+            passed_sl.append(c)
+    else:
+        for c in passed:
+            if is_consumer_vertical:
+                sl_score, sl_reason = evaluate_consumer_second_layer_fit(ai_client, c)
+            else:
+                sl_score, sl_reason = evaluate_second_layer_fit(ai_client, c)
+            if sl_score < 2:
+                continue
+            c["_sl_reason"] = sl_reason
+            passed_sl.append(c)
     print(f"Passed Second Layer: {len(passed_sl)}")
 
     # Step 5: 9-factor scoring
