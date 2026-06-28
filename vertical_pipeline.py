@@ -650,7 +650,7 @@ def main():
     print(f"\nSTEP 3: Second Layer filter")
     print("-" * 60)
     passed_sl = []
-    is_consumer_vertical = (vertical_id == 20)
+    is_consumer_vertical = (idx == 20)
     if is_consumer_vertical and SKIP_SECOND_LAYER_FOR_V20:
         print("Vertical 20 (Consumer): skipping Second Layer filter entirely")
         for c in passed:
