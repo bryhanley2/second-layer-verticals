@@ -23,10 +23,10 @@ SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "102k3pj7JjEhSXWgyBS144mgHd93MZywoW
 MIN_SCORE_PCT = 65
 
 ALLOWED_STAGES = {
-    "pre-seed", "preseed", "pre_seed", "seed", "series a", "series_a",
+    "pre-seed", "preseed", "pre_seed", "seed",
     "angel", "angel round", "friends and family",
 }
-MAX_TOTAL_FUNDING = 15_000_000
+MAX_TOTAL_FUNDING = 10_000_000
 MAX_COMPANY_AGE_YEARS = 5
 MAX_MONTHS_SINCE_LAST_ROUND = 24
 
@@ -99,7 +99,10 @@ def passes_stage_gate(candidate: dict):
         if funding == 0:
             # Zero could mean no data — pass with caution but funding gate will validate further
             return True, "accepted (missing stage and funding data — funding gate will validate)"
-        return False, f"stage missing, funding ${funding:,.0f} too high to assume pre-seed"
+        return False, f"stage missing, funding ${funding:,.0f} too high to assume pre-seed/seed"
+    # Explicitly reject Series A and later — pipeline is seed/pre-seed only now
+    if any(s in stage for s in ("series a", "series_a", "series b", "series c", "series_b", "series_c")):
+        return False, f"stage '{stage}' is Series A or later — excluded, seed/pre-seed only"
     for allowed in ALLOWED_STAGES:
         if allowed in stage:
             return True, f"stage '{stage}' allowed"
