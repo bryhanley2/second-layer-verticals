@@ -298,22 +298,33 @@ def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
 # Source 3: Vertical Claude Research
 # ============================================================================
 def source_vertical_claude_research(ai_client, search_terms: list, vertical_name: str) -> list:
-    """Use Claude to surface seed-stage companies matching vertical-specific queries."""
+    """Use Claude to surface seed-stage companies matching vertical-specific queries.
+
+    IMPORTANT: this function does NOT ask Claude to produce funding figures. Claude
+    is unreliable at recalling exact funding amounts and will fabricate plausible-but-wrong
+    numbers (e.g. recycling another company's figure). Funding is set to null here and
+    populated ONLY by the downstream verification pass (enrich_funding_data), which
+    requires a citable source or returns null. Name/description/website are lower-risk
+    and acceptable to source here, but are still verified downstream.
+    """
     candidates = []
     for term in search_terms:
         prompt = f"""List up to 5 real, specific seed-stage companies matching: "{term}"
 
 Must be:
-- Raised <= $15M total
+- Early-stage (seed or pre-seed), NOT Series A or later
 - Founded 2022 or later
 - US-based or US-operating
 - Real company with named founder and website
 
-Format each as JSON on a single line:
-{{"name": "...", "description": "...", "website": "...", "industry": "{vertical_name}", "founded_date": "YYYY", "total_funding_usd": NUMBER, "last_funding_round": "seed", "founders": "name, prior background"}}
+DO NOT provide funding amounts — leave those to a separate verification step.
+DO NOT guess or estimate any dollar figures.
 
-Do NOT include placeholder or made-up companies. If uncertain, skip.
-Return ONLY JSON lines, nothing else."""
+Format each as JSON on a single line:
+{{"name": "...", "description": "...", "website": "...", "industry": "{vertical_name}", "founded_date": "YYYY", "last_funding_round": "seed", "founders": "name, prior background or UNVERIFIED"}}
+
+Do NOT include placeholder or made-up companies. If uncertain about whether a company
+is real, skip it entirely. Return ONLY JSON lines, nothing else."""
         try:
             response = ai_client.messages.create(
                 model="claude-opus-4-7",
@@ -327,6 +338,10 @@ Return ONLY JSON lines, nothing else."""
                     continue
                 try:
                     c = json.loads(line)
+                    # Force funding to null/0 so the verification pass MUST populate it.
+                    # Never trust a funding figure that came from the sourcing prompt.
+                    c["total_funding_usd"] = 0
+                    c["_funding_unverified"] = True
                     c.setdefault("hq_city", "")
                     c.setdefault("hq_country", "United States")
                     c.setdefault("headcount", 0)
@@ -413,6 +428,7 @@ def verify_zero_funding(ai_client, candidates: list) -> None:
             c["founded_year"] = cb_data.get("founded_year") or c.get("founded_year", "")
             c["_funding_confidence"] = "high"
             c["_funding_source"] = "Crunchbase"
+            c["_funding_unverified"] = False  # cleared: now verified against Crunchbase
             crunchbase_hits += 1
         else:
             still_unknown.append(c)
@@ -473,6 +489,7 @@ Return ONLY a JSON object mapping company name to the fields above. No preamble.
                 continue
             if info.get("total_funding_usd") is not None:
                 c["total_funding_usd"] = info["total_funding_usd"]
+                c["_funding_unverified"] = False  # cleared: cited source provided
                 updated += 1
             if info.get("last_round_type"):
                 c["last_funding_round"] = info["last_round_type"]
