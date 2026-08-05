@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       vertical_index:
-        description: 'Vertical index (0-20), leave blank for day-of-year rotation'
+        description: 'Vertical index (0-21), leave blank for day-of-year rotation'
         required: false
         default: ''
 
