@@ -334,11 +334,22 @@ def write_scored_candidates(client, tab_name: str, scored: list, vertical_label:
     for c in scored:
         cand = c["candidate"]
         s = c.get("scores", {})
+        # Make funding-verification status visible in the sheet. If the funding figure
+        # was never verified against a citable source, mark it clearly rather than
+        # writing a bare number that looks authoritative.
+        funding_val = safe_float(cand.get("total_funding_usd", 0))
+        conf = (cand.get("_funding_confidence") or "").lower()
+        if conf in ("low", "unverified") or cand.get("_funding_unverified"):
+            funding_display = f"{funding_val:.0f} (UNVERIFIED)"
+        elif conf == "medium":
+            funding_display = f"{funding_val:.0f} (single-source)"
+        else:
+            funding_display = funding_val
         rows.append([
             now,
             cand.get("name", ""),
             cand.get("last_funding_round", cand.get("stage", "")),
-            safe_float(cand.get("total_funding_usd", 0)),
+            funding_display,
             vertical_label or cand.get("industry", ""),
             cand.get("_source", "Crustdata"),
             c.get("sl_reason", ""),
