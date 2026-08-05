@@ -262,6 +262,59 @@ VERTICALS = [
             "protein snack brand bootstrapped raising seed round",
         ],
     },
+    {
+        # V21 — Bryan's core thesis: asset-light software that unlocks, accelerates,
+        # and optimizes the energy, grid, and thermal buildout AI relies on.
+        # Deliberately covers all 4 subsectors in one vertical:
+        #   (1) Siting & permitting intelligence
+        #   (2) Interconnection & grid navigation
+        #   (3) Financing / transaction infrastructure
+        #   (4) Thermal / cooling optimization software
+        # Keywords are software-specific and exclude hardware/generation terms
+        # (no "solar panel," "battery manufacturing," "hardware") to keep sourcing
+        # asset-light per thesis. Pair with a tightened funding gate (<=$10M, seed/pre-seed).
+        "id": 21,
+        "name": "AI Physical Infrastructure Software (Energy, Grid & Thermal)",
+        "keywords": [
+            # Subsector 1: siting & permitting
+            "siting", "permitting", "site selection", "interconnection software",
+            # Subsector 2: interconnection & grid navigation
+            "interconnection queue", "grid planning", "transmission", "power flow",
+            "grid interconnection", "load growth", "grid modernization",
+            # Subsector 3: financing / transaction infrastructure
+            "tax credit", "transferability", "energy financing", "project finance software",
+            "ppa", "power purchase agreement",
+            # Subsector 4: thermal / cooling optimization
+            "data center cooling", "thermal management", "cooling optimization",
+            "liquid cooling software", "water usage effectiveness", "pue optimization",
+            # cross-cutting AI-demand framing
+            "data center power", "ai data center", "grid software", "energy software",
+        ],
+        "rss_feeds": [
+            "https://www.canarymedia.com/feed",
+            "https://www.latitudemedia.com/news/rss.xml",
+            "https://www.utilitydive.com/feeds/news/",
+            "https://www.datacenterdynamics.com/en/rss/",
+        ],
+        "search_terms": [
+            # Subsector 1
+            "energy siting permitting software startup seed round 2026",
+            "renewable project siting software seed funding raised",
+            # Subsector 2
+            "grid interconnection software startup seed funding 2026",
+            "transmission grid planning software seed round raised",
+            "interconnection queue software seed funding announced",
+            # Subsector 3
+            "clean energy tax credit marketplace seed funding",
+            "energy project finance software startup seed round",
+            # Subsector 4
+            "data center cooling optimization software seed funding 2026",
+            "thermal management software startup seed round raised",
+            "data center water cooling software seed funding",
+            # cross-cutting
+            "AI data center energy software startup seed round 2026",
+        ],
+    },
 ]
 
 
