@@ -30,6 +30,14 @@ MAX_TOTAL_FUNDING = 10_000_000
 MAX_COMPANY_AGE_YEARS = 5
 MAX_MONTHS_SINCE_LAST_ROUND = 24
 
+# Tightened thesis range for post-enrichment verification.
+# The initial gate uses MAX_TOTAL_FUNDING ($10M) as a hard ceiling, but the thesis
+# actually targets genuine seed ($1.8M-$4M). Companies between $4M and $10M pass the
+# hard gate but are flagged as "above target range" so they can be reviewed, not
+# silently treated as in-thesis.
+TARGET_FUNDING_FLOOR = 1_800_000
+TARGET_FUNDING_CEILING = 4_000_000
+
 # 9-factor rubric weights
 FACTOR_WEIGHTS = {
     "1A": 0.14, "1B": 0.11, "1C": 0.10,
@@ -144,6 +152,61 @@ def passes_all_gates(candidate: dict):
         if not ok:
             return False, reason
     return True, "all gates passed"
+
+
+def verify_size_post_enrichment(candidate: dict):
+    """
+    Second-layer SIZE filter, run AFTER funding enrichment/verification.
+
+    The initial passes_funding_gate() runs BEFORE enrichment, when many companies
+    have total_funding_usd == 0 (missing data). Those pass on their stage LABEL alone.
+    The problem: a company can be labeled "seed" but have actually raised $68M
+    (e.g. Emerald AI) or $97M (e.g. Gridware) — the label lies, and the initial gate
+    trusts it because the real number wasn't populated yet.
+
+    This function re-checks size ONCE REAL FUNDING DATA EXISTS, and returns a status:
+      - "REJECT"      : verified funding now exceeds the $10M hard cap -> remove from pipeline
+      - "ABOVE_RANGE" : within the $10M cap but above the $4M thesis target -> keep, but flag
+      - "IN_RANGE"    : within the $1.8M-$4M thesis sweet spot -> ideal
+      - "BELOW_RANGE" : below $1.8M (very early / pre-seed-ish) -> keep, flag as earliest-stage
+      - "UNVERIFIED"  : still no real funding figure -> cannot confirm, flag for manual check
+
+    Returns (status: str, reason: str).
+    """
+    total = safe_float(candidate.get("total_funding_usd", 0))
+    confidence = (candidate.get("_funding_confidence") or "").lower()
+    unverified = candidate.get("_funding_unverified", False)
+
+    # If funding is still 0 or the figure was never verified, we CANNOT confirm size.
+    # Do not silently pass — flag it so it doesn't masquerade as in-thesis.
+    if total == 0 or unverified or confidence in ("", "low", "unverified"):
+        return "UNVERIFIED", (
+            "size UNVERIFIED — no confirmed funding figure post-enrichment; "
+            "manual funding check required before treating as in-thesis"
+        )
+
+    # Real, verified figure exists — now enforce the hard cap that the initial
+    # gate could not enforce when data was missing.
+    if total > MAX_TOTAL_FUNDING:
+        return "REJECT", (
+            f"REJECT — verified funding ${total:,.0f} exceeds ${MAX_TOTAL_FUNDING:,.0f} "
+            f"hard cap (passed initial gate on missing/label data; real figure disqualifies)"
+        )
+
+    if total > TARGET_FUNDING_CEILING:
+        return "ABOVE_RANGE", (
+            f"ABOVE target range — ${total:,.0f} is within the ${MAX_TOTAL_FUNDING:,.0f} cap "
+            f"but above the ${TARGET_FUNDING_CEILING:,.0f} thesis target; keep but flag as "
+            f"more de-risked / pricier entry"
+        )
+
+    if total < TARGET_FUNDING_FLOOR:
+        return "BELOW_RANGE", (
+            f"BELOW target range — ${total:,.0f} is under ${TARGET_FUNDING_FLOOR:,.0f}; "
+            f"earliest-stage entry, relationship-build play"
+        )
+
+    return "IN_RANGE", f"IN target range — ${total:,.0f} within ${TARGET_FUNDING_FLOOR:,.0f}-${TARGET_FUNDING_CEILING:,.0f} sweet spot"
 
 
 # ---------- Second Layer thesis filter ----------
@@ -339,12 +402,18 @@ def write_scored_candidates(client, tab_name: str, scored: list, vertical_label:
         # writing a bare number that looks authoritative.
         funding_val = safe_float(cand.get("total_funding_usd", 0))
         conf = (cand.get("_funding_confidence") or "").lower()
+        size_status = cand.get("_size_status", "")
         if conf in ("low", "unverified") or cand.get("_funding_unverified"):
             funding_display = f"{funding_val:.0f} (UNVERIFIED)"
         elif conf == "medium":
             funding_display = f"{funding_val:.0f} (single-source)"
         else:
             funding_display = funding_val
+        # Append the thesis-range size status (IN_RANGE / ABOVE_RANGE / BELOW_RANGE)
+        # so a reviewer sees at a glance whether a company is in the $1.8M-$4M sweet
+        # spot or merely under the $10M hard cap.
+        if size_status and size_status not in ("IN_RANGE",):
+            funding_display = f"{funding_display} [{size_status}]"
         rows.append([
             now,
             cand.get("name", ""),
