@@ -32,6 +32,7 @@ import feedparser
 from pipeline_utils import (
     get_sheet_client, get_anthropic_client, SHEET_ID,
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
+    verify_size_post_enrichment,
     decision_from_score, write_scored_candidates, read_existing_names,
     send_email_digest, MIN_SCORE_PCT, safe_float,
 )
@@ -656,6 +657,27 @@ def main():
     print("-" * 60)
     passed = [c for c in candidates if passes_all_gates(c)[0]]
     print(f"Passed gates: {len(passed)} / {len(candidates)}")
+
+    # Step 3b: Post-enrichment SIZE re-verification.
+    # The hard funding gate runs on pre-enrichment data and passes companies with
+    # missing funding on their stage LABEL alone. Now that verify_zero_funding has
+    # populated real figures, re-check size and REMOVE any company whose verified
+    # funding actually exceeds the $10M cap (the Emerald AI / Gridware leak).
+    # Companies that survive are tagged with a size status for visibility.
+    print(f"\nSTEP 2b: Post-enrichment size verification")
+    print("-" * 60)
+    size_verified = []
+    for c in passed:
+        status, reason = verify_size_post_enrichment(c)
+        c["_size_status"] = status
+        if status == "REJECT":
+            print(f"  REMOVED: {c.get('name', '?')} — {reason}")
+            continue
+        if status in ("ABOVE_RANGE", "UNVERIFIED"):
+            print(f"  FLAG ({status}): {c.get('name', '?')} — {reason}")
+        size_verified.append(c)
+    passed = size_verified
+    print(f"After size verification: {len(passed)}")
 
     # Step 4: Second Layer thesis filter
     # V20 (Consumer Health & Wellness Brands) uses a different logic than B2B verticals.
