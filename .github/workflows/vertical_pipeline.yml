@@ -33,6 +33,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          # Optional: funding verification uses Crunchbase as pass 1 when this is set.
+          CRUNCHBASE_API_KEY: ${{ secrets.CRUNCHBASE_API_KEY }}
           VERTICAL_INDEX: ${{ github.event.inputs.vertical_index }}
           # On-demand industry query: from a manual run's input, or a repository_dispatch
           # (type: run-industry-pipeline) client_payload.industry_query.

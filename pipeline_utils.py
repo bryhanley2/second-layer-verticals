@@ -461,12 +461,14 @@ def write_scored_candidates(client, tab_name: str, scored: list, vertical_label:
         funding_val = safe_float(cand.get("total_funding_usd", 0))
         conf = (cand.get("_funding_confidence") or "").lower()
         size_status = cand.get("_size_status", "")
+        src = str(cand.get("_funding_source") or "").strip()
         if conf in ("low", "unverified") or cand.get("_funding_unverified"):
-            funding_display = f"{funding_val:.0f} (UNVERIFIED)"
-        elif conf == "medium":
-            funding_display = f"{funding_val:.0f} (single-source)"
+            # src here is the "tried — crunchbase: ...; sec form d: ...; claude: ..." trail.
+            funding_display = f"UNVERIFIED · {src}" if src.startswith("tried") else "UNVERIFIED"
         else:
-            funding_display = funding_val
+            label = {"high": "", "medium": " (single source)"}.get(conf, "")
+            short_src = src.split("://", 1)[-1].split("/", 1)[0] if src.startswith("http") else src
+            funding_display = f"{funding_val:,.0f}{label}" + (f" · {short_src}" if short_src else "")
         # Append the thesis-range size status (IN_RANGE / ABOVE_RANGE / BELOW_RANGE)
         # so a reviewer sees at a glance whether a company is in the $1.8M-$4M sweet
         # spot or merely under the $10M hard cap.

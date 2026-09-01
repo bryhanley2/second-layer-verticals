@@ -124,7 +124,13 @@ The last three run in STEP 1 unless `EXTRA_SOURCES=0` (env / repo variable).
 
 > **Note on V20 (Consumer Health & Wellness Brands):** This vertical sources primarily through CPG-specific RSS feeds (FoodNavigator-USA, BevNET, Nosh, Beauty Independent, Food Dive) and Claude Research. YC, SEC Form D, and SBIR sources contribute minimally for consumer brands but do not require separate infrastructure.
 
-All candidates pass a **funding verification step** (Claude fills in funding/stage for $0 candidates, requiring a citable source or returning null — never guessing) before the three hard gates run, and V21 additionally runs a **post-enrichment size re-check** (see below).
+All $0-funding candidates pass a **multi-source funding verification step** before the three hard gates run (and V21 additionally runs a **post-enrichment size re-check** — see below):
+
+1. **Crunchbase API** — only if `CRUNCHBASE_API_KEY` is set (`high` confidence)
+2. **SEC EDGAR Form D** — the company's own filings, *strict* name match, fund/SPV entities rejected; sums `totalAmountSold` across filings (`medium` confidence, filing URL as the citation) — this is what catches the "labelled seed, actually raised $170M" case
+3. **Claude** — with a hard source-citation requirement; returns null (never a guess) when it can't cite one
+
+Every candidate carries a `_funding_checks` audit trail. A verified figure ships with its source URL; an unverified one ships with exactly what was tried (`unverified (checked crunchbase: no key; sec form d: no filing; claude: no source)`) so the analyst knows what to check by hand.
 
 ### Proprietary Sourcing Layer (V21 Only)
 
@@ -312,6 +318,8 @@ Set `ENRICH_CONTACTS=0` to skip the lookup.
 | `ANTHROPIC_API_KEY` | Claude Research sourcing, scoring, funding verification |
 | `GOOGLE_CREDENTIALS_JSON` | Sheet read/write |
 | `GOOGLE_SHEET_ID` | Target sheet |
+| `GMAIL_USER` / `GMAIL_APP_PASSWORD` / `EMAIL_RECIPIENT` | Outreach digest email (optional — skipped if unset) |
+| `CRUNCHBASE_API_KEY` | Funding verification pass 1 (optional — SEC + Claude run without it) |
 | `GITHUB_TOKEN` | GitHub search source (optional) |
 
 ---

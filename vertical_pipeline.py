@@ -39,6 +39,7 @@ import os
 import sys
 import json
 import re
+import time
 from datetime import datetime, timezone
 import requests
 import feedparser
@@ -683,26 +684,118 @@ def _crunchbase_lookup(company_name: str) -> dict:
         return {}
 
 
+# --- SEC EDGAR Form D funding lookup (free, no key, strict name match) --------
+_SEC_UA = {"User-Agent": "SecondLayerVC research bryanhanleyvc@gmail.com"}
+_LEGAL_SUFFIX_RE = re.compile(
+    r"[\s,.]+(inc|incorporated|llc|l\.l\.c|corp|corporation|co|ltd|limited|lp|l\.p|plc|holdings)\.?$",
+    re.I,
+)
+# Names that mean "investment vehicle", not "the operating company".
+_FUND_ENTITY_RE = re.compile(r"\b(spv|fund|series|capital|ventures?|partners|trust|holdings)\b", re.I)
+
+
+def _norm_company(name: str) -> str:
+    n = (name or "").lower().strip()
+    n = re.sub(r"\(cik.*?\)", "", n)
+    prev = None
+    while prev != n:  # strip stacked suffixes ("Foo Co, Inc.")
+        prev = n
+        n = _LEGAL_SUFFIX_RE.sub("", n).strip()
+    return re.sub(r"[^a-z0-9 ]", "", n).strip()
+
+
+def _sec_form_d_lookup(company_name: str, max_filings: int = 5) -> dict:
+    """Look up a company's own Form D filings on EDGAR and sum totalAmountSold.
+
+    STRICT name match only (normalized exact, or exact prefix for multi-word
+    names) and fund/SPV entities are rejected — a wrong figure is worse than
+    none. Returns {} on no confident match, or a dict with total_funding_usd,
+    last_funding_date, source_url, entity_name, n_filings.
+    """
+    q = _norm_company(company_name)
+    if len(q) < 4:
+        return {}
+    try:
+        r = requests.get(
+            "https://efts.sec.gov/LATEST/search-index",
+            params={"q": f'"{company_name}"', "forms": "D"},
+            headers=_SEC_UA, timeout=20,
+        )
+        hits = r.json().get("hits", {}).get("hits", []) if r.status_code == 200 else []
+    except Exception:
+        return {}
+
+    matched = []
+    for h in hits:
+        src = h.get("_source", {})
+        display = (src.get("display_names") or [""])[0]
+        if _FUND_ENTITY_RE.search(display):
+            continue
+        norm = _norm_company(display)
+        if norm == q or (len(q.split()) >= 2 and norm.startswith(q + " ")):
+            matched.append((h.get("_id", ""), (src.get("ciks") or [""])[0], src.get("file_date", ""), display))
+    if not matched:
+        return {}
+
+    total, dates = 0.0, []
+    for _id, cik, fdate, _display in matched[:max_filings]:
+        if not cik or ":" not in _id:
+            continue
+        acc = _id.split(":")[0].replace("-", "")
+        try:
+            xml = requests.get(
+                f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}/primary_doc.xml",
+                headers=_SEC_UA, timeout=20,
+            ).text
+        except Exception:
+            continue
+        m = re.search(r"<totalAmountSold>(\d+)</totalAmountSold>", xml)
+        if m:
+            total += float(m.group(1))
+        if fdate:
+            dates.append(fdate)
+        time.sleep(0.2)  # SEC politeness
+
+    if total <= 0:
+        return {}
+    cik0 = int(matched[0][1])
+    return {
+        "total_funding_usd": int(total),
+        "last_funding_date": max(dates) if dates else "",
+        "source_url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik0:010d}&type=D",
+        "entity_name": re.sub(r"\s*\(CIK.*?\)", "", matched[0][3]).strip(),
+        "n_filings": len(matched),
+    }
+
+
 def verify_zero_funding(ai_client, candidates: list) -> None:
     """
-    Two-pass funding verification:
-      1. For each candidate showing $0, try Crunchbase API (if key configured).
-      2. For remaining unverified candidates, ask Claude — but Claude must cite
-         a source or return "unverified". No estimation, no extrapolation.
+    Multi-pass funding verification for $0 candidates. Never guesses — a figure
+    is set only when a source can be named.
 
-    Populates: total_funding_usd, last_funding_round (the round name like "Series A"),
-    last_round_type (explicit round label for the new sheet column),
-    last_funding_date, founded_year, _funding_confidence, _funding_source.
+      1.  Crunchbase API (only if CRUNCHBASE_API_KEY is set)
+      1b. SEC EDGAR Form D — the company's own filings, strict name match
+      2.  Claude, with a hard source-citation requirement
+
+    Every candidate that starts at $0 gets a `_funding_checks` list recording
+    what each pass found ("crunchbase: no key", "sec form d: $2.1M (2024-03-01)",
+    "claude: no citable source"). Sets total_funding_usd, last_funding_round,
+    last_funding_date, founded_year, _funding_confidence, _funding_source (a
+    URL/citation when verified, else the joined checks), _funding_unverified.
     """
     zero = [c for c in candidates if safe_float(c.get("total_funding_usd", 0)) == 0]
     if not zero:
         return
+    for c in zero:
+        c.setdefault("_funding_checks", [])
+
+    have_cb_key = bool(os.environ.get("CRUNCHBASE_API_KEY"))
 
     # ----- Pass 1: Crunchbase lookup -----
     crunchbase_hits = 0
     still_unknown = []
     for c in zero:
-        cb_data = _crunchbase_lookup(c["name"])
+        cb_data = _crunchbase_lookup(c["name"]) if have_cb_key else {}
         if cb_data and cb_data.get("total_funding_usd"):
             c["total_funding_usd"] = cb_data["total_funding_usd"]
             c["last_funding_round"] = cb_data.get("last_funding_type") or c.get("last_funding_round", "")
@@ -710,19 +803,47 @@ def verify_zero_funding(ai_client, candidates: list) -> None:
             c["last_funding_date"] = cb_data.get("last_funding_date") or c.get("last_funding_date", "")
             c["founded_year"] = cb_data.get("founded_year") or c.get("founded_year", "")
             c["_funding_confidence"] = "high"
-            c["_funding_source"] = "Crunchbase"
-            c["_funding_unverified"] = False  # cleared: now verified against Crunchbase
+            c["_funding_source"] = "https://www.crunchbase.com/ (Crunchbase API)"
+            c["_funding_unverified"] = False
+            c["_funding_checks"].append(f"crunchbase: ${cb_data['total_funding_usd']:,.0f}")
             crunchbase_hits += 1
         else:
+            c["_funding_checks"].append("crunchbase: no API key" if not have_cb_key else "crunchbase: no match")
             still_unknown.append(c)
     if crunchbase_hits:
-        print(f"[Funding verify] Crunchbase: {crunchbase_hits} candidates verified")
+        print(f"[Funding verify] Crunchbase: {crunchbase_hits} verified")
+
+    # ----- Pass 1b: SEC EDGAR Form D (free, strict match) -----
+    sec_hits = 0
+    after_sec = []
+    for c in still_unknown:
+        sec = _sec_form_d_lookup(c["name"])
+        if sec:
+            c["total_funding_usd"] = sec["total_funding_usd"]
+            c["last_funding_date"] = sec.get("last_funding_date") or c.get("last_funding_date", "")
+            c["_funding_confidence"] = "medium"
+            c["_funding_source"] = sec["source_url"]
+            c["_funding_unverified"] = False
+            c["_funding_checks"].append(
+                f"sec form d: ${sec['total_funding_usd']:,.0f} over {sec['n_filings']} filing(s), "
+                f"as {sec['entity_name']}"
+            )
+            sec_hits += 1
+        else:
+            c["_funding_checks"].append("sec form d: no matching filing")
+            after_sec.append(c)
+        time.sleep(0.15)
+    still_unknown = after_sec
+    if sec_hits:
+        print(f"[Funding verify] SEC Form D: {sec_hits} verified")
 
     if not still_unknown:
         return
 
     # ----- Pass 2: Claude verification with strict source-citation rule -----
     names = [c["name"] for c in still_unknown][:40]
+    for c in still_unknown[40:]:
+        c["_funding_checks"].append("claude: skipped (per-run batch cap)")
     prompt = f"""You are verifying funding and team data for the seed-stage startups below.
 DO NOT estimate. DO NOT extrapolate from similar companies. DO NOT use general knowledge.
 DO NOT fabricate founder names — this is a CRITICAL anti-hallucination rule.
@@ -763,16 +884,21 @@ Return ONLY a JSON object mapping company name to the fields above. No preamble.
         for c in still_unknown:
             info = verified.get(c["name"], {})
             if not info:
+                c["_funding_checks"].append("claude: no response for this company")
+                unverified_count += 1
                 continue
             confidence = (info.get("confidence") or "").lower()
-            if confidence in ("low", "unverified"):
-                c["_funding_confidence"] = confidence
-                c["_funding_source"] = info.get("source_citation") or "no source"
+            if confidence in ("low", "unverified") or info.get("total_funding_usd") is None:
+                c["_funding_confidence"] = confidence or "unverified"
+                c["_funding_checks"].append("claude: no citable source")
                 unverified_count += 1
                 continue
             if info.get("total_funding_usd") is not None:
                 c["total_funding_usd"] = info["total_funding_usd"]
                 c["_funding_unverified"] = False  # cleared: cited source provided
+                c["_funding_checks"].append(
+                    f"claude: ${info['total_funding_usd']:,.0f} — {info.get('source_citation') or 'cited'}"
+                )
                 updated += 1
             if info.get("last_round_type"):
                 c["last_funding_round"] = info["last_round_type"]
@@ -799,7 +925,23 @@ Return ONLY a JSON object mapping company name to the fields above. No preamble.
         print(f"[Funding verify] Claude: {updated} verified, {unverified_count} flagged as unverified")
     except Exception as e:
         record_llm_error("funding verification pass", e)
+        for c in still_unknown:
+            c["_funding_checks"].append("claude: verification pass errored")
         print("[Funding verify] proceeding with pre-verification data for this batch")
+
+    _finalize_unverified(still_unknown)
+
+
+def _finalize_unverified(candidates: list) -> None:
+    """For any candidate still at $0 after all passes, make the state legible:
+    _funding_source becomes the joined audit trail so the sheet/digest can show
+    exactly what was tried."""
+    for c in candidates:
+        if safe_float(c.get("total_funding_usd", 0)) == 0:
+            c["_funding_unverified"] = True
+            c.setdefault("_funding_confidence", "unverified")
+            checks = c.get("_funding_checks") or []
+            c["_funding_source"] = ("tried — " + "; ".join(checks)) if checks else "no verification attempted"
 
 
 # ============================================================================
@@ -891,6 +1033,18 @@ Return ONLY: SCORE: N | REASON: one short sentence"""
         return 1, "consumer Second Layer eval failed (LLM error) — excluded"
 
 
+def _funding_line(cand: dict) -> str:
+    val = safe_float(cand.get("total_funding_usd", 0))
+    conf = (cand.get("_funding_confidence") or "").lower()
+    src = str(cand.get("_funding_source") or "").strip()
+    if cand.get("_funding_unverified") or conf in ("", "low", "unverified") or val == 0:
+        src = src[len("tried — "):] if src.startswith("tried — ") else src
+        return f"unverified (checked {src})" if src else "unverified"
+    date = cand.get("last_funding_date") or ""
+    tag = " (single source)" if conf == "medium" else ""
+    return f"${val:,.0f}{(' as of ' + date) if date else ''}{tag} — {src}"
+
+
 def build_outreach_digest(scored: list) -> str:
     """Plain-text digest of the top candidates with outreach details, for the
     email to the analyst. `scored` is expected pre-sorted (best first); items
@@ -905,6 +1059,7 @@ def build_outreach_digest(scored: list) -> str:
         if c.get("founders"):
             lines.append(f"   Founders: {c['founders']}")
         lines.append(f"   Second Layer: {c.get('sl_reason', '')}")
+        lines.append(f"   Funding: {_funding_line(cand)}")
         if c.get("strengths"):
             lines.append(f"   + {c['strengths']}")
         if c.get("risks"):
