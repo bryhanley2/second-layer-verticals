@@ -281,21 +281,101 @@ VERTICALS = [
             # Subsector 2: interconnection & grid navigation
             "interconnection queue", "grid planning", "transmission", "power flow",
             "grid interconnection", "load growth", "grid modernization",
+            "grid software", "utility software", "grid AI", "energy grid",
             # Subsector 3: financing / transaction infrastructure
             "tax credit", "transferability", "energy financing", "project finance software",
             "ppa", "power purchase agreement",
             # Subsector 4: thermal / cooling optimization
             "data center cooling", "thermal management", "cooling optimization",
             "liquid cooling software", "water usage effectiveness", "pue optimization",
-            # cross-cutting AI-demand framing
+            # cross-cutting AI-demand framing (broadened to catch plain-language YC-style
+            # descriptions like "AI-powered grid planning for utilities", which won't
+            # literally contain narrower technical phrases like "interconnection queue")
             "data center power", "ai data center", "grid software", "energy software",
+            "power infrastructure", "energy infrastructure", "grid AI", "energy AI",
+            "power grid", "utility AI", "clean energy software",
         ],
         "rss_feeds": [
+            # TRUE RSS FEEDS ONLY — safe for a standard feed parser.
             "https://www.canarymedia.com/feed",
             "https://www.latitudemedia.com/news/rss.xml",
             "https://www.utilitydive.com/feeds/news/",
             "https://www.datacenterdynamics.com/en/rss/",
         ],
+
+        # ------------------------------------------------------------------
+        # SCRAPE TARGETS — HTML pages, NOT RSS. Do not feed these to the RSS
+        # parser; they need a separate scrape pass that looks for newly-listed
+        # company names since the last run.
+        #
+        # WHY THESE EXIST: the rss_feeds above are press-and-announcement based,
+        # meaning every VC scraping the same sources sees the same companies.
+        # The targets below surface companies BEFORE they appear in venture press —
+        # this is the proprietary layer of the pipeline.
+        #
+        # Proven results from this channel type:
+        #   - Glacian Technologies  <- university tech-transfer (Penn State)
+        #   - GridBoost, ContractPower  <- DOE AI4IX teaming list
+        # ------------------------------------------------------------------
+        "scrape_targets": [
+            # --- DOE program ecosystems (formation-stage, pre-institutional) ---
+            # Awardees/performers are US interconnection SOFTWARE teams with
+            # non-dilutive federal validation, usually pre-VC.
+            "https://www.energy.gov/gdo/ai-interconnection-ai4ix",
+            "https://www.energy.gov/eere/i2x/interconnection-innovation-e-xchange-homepage",
+            "https://www.connectwerx.org/portfolio-items/",
+            "https://www.connectwerx.org/portfolio-items/ppo-cwx-010-gdo-accelerating-interconnection-through-ai-ai4ax/",
+            # DOE SBIR/STTR award database — filter energy topic codes. Awardees are
+            # pre-institutional software teams with federal non-dilutive validation.
+            "https://www.sbir.gov/awards",
+            "https://science.osti.gov/sbir/Awards",
+
+            # --- Specialist fund portfolio monitoring (investor-signal convergence) ---
+            # These funds keep appearing across the best comps this thesis has found
+            # (Pearl Street, Rhizome, Distill, CapeZero). Diff their portfolio pages
+            # month over month; NEW additions are checks written before press coverage.
+            "https://www.powerhouse.fund/portfolio",
+            "https://www.stepchange.vc/portfolio",
+            "https://www.convective.vc/portfolio",
+            "https://www.mcjcollective.com/portfolio",
+
+            # --- Regional / state program cohorts (NY-local, relationship-buildable) ---
+            "https://www.nyserda.ny.gov/All-Programs/Innovation-Programs",
+            "https://urbanfuturelab.org/portfolio/",
+            "https://www.thecleanfight.com/portfolio",
+
+            # --- Specialist accelerator cohorts ---
+            # NOTE: heavy hardware skew (e.g. Third Derivative's 2026 cohort was ~90%
+            # hardware/materials). Expect a LOW hit rate — the value is the 2-3 software
+            # companies per cohort that clear the asset-light filter, not the full list.
+            "https://www.third-derivative.org/blog",
+            "https://elementalimpact.com/portfolio/",
+            "https://www.greentownlabs.com/members/",
+
+            # --- RTO/ISO market participant registrations (commercialization signal) ---
+            # A software company registering as a market participant is going commercial.
+            # This is how Rewbi surfaced (ERCOT registration).
+            "https://www.ercot.com/services/rq/re",
+            "https://www.pjm.com/markets-and-operations/etools/oasis",
+        ],
+
+        # ------------------------------------------------------------------
+        # SCRAPE FILTER RULES — apply to every company found via scrape_targets
+        # before it enters the candidate pool. These channels have LOW precision
+        # by design (accelerator cohorts are ~90% hardware), so filtering is what
+        # makes the channel valuable rather than noisy.
+        # ------------------------------------------------------------------
+        "scrape_filters": {
+            "require_us": True,          # thesis is US-only
+            "require_software": True,    # reject hardware/materials/manufacturing
+            "reject_keywords": [         # hard-reject signals in company description
+                "manufactur", "hardware", "materials", "cold plate", "immersion",
+                "coolant distribution", "heat pump", "sensor", "device", "equipment",
+                "fabrication", "chemistry", "membrane", "electrolyzer",
+            ],
+            "max_total_funding": 10_000_000,
+        },
+
         "search_terms": [
             # Subsector 1
             "energy siting permitting software startup seed round 2026",
@@ -313,6 +393,26 @@ VERTICALS = [
             "data center water cooling software seed funding",
             # cross-cutting
             "AI data center energy software startup seed round 2026",
+            # DOE program awardees (formation-stage interconnection software teams)
+            "DOE AI4IX awardee interconnection software company selected",
+            "i2X iQMS queue management software awardee startup",
+            "ConnectWERX interconnection AI performer selected company",
+            # specialist climate-deal coverage (surfaced CapeZero, Distill Energy, Piq
+            # this run — small seed rounds in-range that generalist sources miss)
+            "grid software startup pre-seed OR seed $2 million $3 million 2026 Axios",
+            "clean energy financing software seed round under $4 million 2026",
+            # university tech-transfer / commercialization (surfaced Glacian)
+            "university spinout data center cooling software commercialization 2026",
+            "NSF I-Corps energy grid software startup commercialization",
+            "tech transfer energy software startup first commercial deal 2026",
+            # federal non-dilutive validation (pre-institutional software teams)
+            "DOE SBIR Phase II award grid interconnection software company",
+            "ARPA-E project team grid software startup commercialization",
+            # specialist accelerator cohorts (low precision, high proprietary value)
+            "Elemental Impact OR Third Derivative cohort grid software startup 2026",
+            "NYSERDA OR Urban Future Lab cohort grid energy software startup",
+            # investor-signal convergence (funds that keep appearing in the best comps)
+            "Powerhouse Ventures OR Stepchange new portfolio grid energy software seed",
         ],
     },
 ]
@@ -323,6 +423,56 @@ def get_vertical(vertical_id: int) -> dict:
     if 0 <= vertical_id < len(VERTICALS):
         return VERTICALS[vertical_id]
     return None
+
+
+def get_scrape_targets(vertical: dict) -> list:
+    """
+    Return HTML scrape targets for a vertical (empty list if none defined).
+
+    These are NOT RSS feeds — they are pages that must be scraped for newly-listed
+    company names. Keep them separate from rss_feeds so a standard feed parser
+    never chokes on HTML.
+
+    Only V21 defines these today; every other vertical safely returns [].
+    """
+    return vertical.get("scrape_targets", []) or []
+
+
+def get_scrape_filters(vertical: dict) -> dict:
+    """
+    Return the filter rules to apply to companies found via scrape_targets.
+
+    Scrape channels (accelerator cohorts, program awardee lists) have deliberately
+    LOW precision — e.g. Third Derivative's 2026 cohort was ~90% hardware. These
+    filters are what convert a noisy channel into a useful one.
+
+    Returns sane defaults if the vertical defines no filters.
+    """
+    return vertical.get("scrape_filters", {
+        "require_us": True,
+        "require_software": True,
+        "reject_keywords": [],
+        "max_total_funding": 10_000_000,
+    })
+
+
+def passes_scrape_filter(company_text: str, vertical: dict) -> tuple:
+    """
+    Quick pre-filter for companies found via scrape_targets.
+
+    Runs BEFORE the expensive enrichment/scoring steps so obvious hardware
+    companies from accelerator cohorts get dropped cheaply.
+
+    Returns (passed: bool, reason: str).
+    """
+    filters = get_scrape_filters(vertical)
+    text = (company_text or "").lower()
+
+    for kw in filters.get("reject_keywords", []):
+        if kw.lower() in text:
+            return False, f"rejected: matched hardware/non-software keyword '{kw}'"
+
+    return True, "passed scrape pre-filter"
 
 
 def get_vertical_by_day_of_year(day: int = None):
