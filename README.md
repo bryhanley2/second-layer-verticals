@@ -20,7 +20,7 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 
 ---
 
-## Verticals (V0–V20)
+## Verticals (V0–V21)
 
 ### Original Verticals (V0–V5)
 
@@ -68,6 +68,18 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 |----|----------|--------------------|
 | **V20** | Consumer Health & Wellness Brands | Health/wellness trend and functional food movement created consumer demand for better-for-you alternatives in legacy indulgence categories (snacking, beverages, personal care) that incumbents are structurally slow to serve |
 
+### Thesis Vertical — Fund Focus (V21)
+
+| ID | Vertical | Second Layer Logic |
+|----|----------|--------------------|
+| **V21** | AI Physical Infrastructure Software (Energy, Grid & Thermal) | AI compute demand is outpacing the energy, grid, and thermal buildout meant to sustain it; V21 sources asset-light software that unlocks, accelerates, and optimizes that buildout — not the buildout itself |
+
+**V21 is the fund's core thesis vertical**, distinct from V0 (general energy/climate) and V14 (broader AI compute/data center infrastructure) in three ways:
+
+- **Narrower scope:** four defined subsectors only — Siting & Permitting Intelligence, Interconnection & Grid Navigation, Financing/Transaction Infrastructure, Thermal/Cooling Optimization Software
+- **Tighter stage discipline:** target funding range is **$1.8M–$4M** (genuine seed), not the $15M ceiling used elsewhere in the pipeline — see [V21 Funding Range](#v21-funding-range-tighter-than-other-verticals) below
+- **Proprietary source architecture:** V21 is the only vertical with a `scrape_targets` field — see [Proprietary Sourcing Layer](#proprietary-sourcing-layer-v21-only) below
+
 ---
 
 ## Pipeline Architecture
@@ -86,7 +98,7 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 | RSS Funding Feeds | Per run | 3–5 seed matches | Medium — funding signal |
 | Claude Research | Per run | 6–8 candidates | High — framework-aligned |
 
-### Vertical Pipeline Sources (V0–V20)
+### Vertical Pipeline Sources (V0–V21)
 
 The vertical pipeline runs per-vertical and uses five free sources, each filtered by the vertical's keywords:
 
@@ -100,7 +112,37 @@ The vertical pipeline runs per-vertical and uses five free sources, each filtere
 
 > **Note on V20 (Consumer Health & Wellness Brands):** This vertical sources primarily through CPG-specific RSS feeds (FoodNavigator-USA, BevNET, Nosh, Beauty Independent, Food Dive) and Claude Research. YC, SEC Form D, and SBIR sources contribute minimally for consumer brands but do not require separate infrastructure.
 
-All candidates pass a **funding verification step** (Claude fills in funding/stage for $0 candidates) before the three hard gates run.
+All candidates pass a **funding verification step** (Claude fills in funding/stage for $0 candidates, requiring a citable source or returning null — never guessing) before the three hard gates run, and V21 additionally runs a **post-enrichment size re-check** (see below).
+
+### Proprietary Sourcing Layer (V21 Only)
+
+V21 uses everything above **plus an 18-target scrape layer** the other 21 verticals don't have. The five-source list above is press-and-announcement based — every fund scraping YC and TechCrunch sees the same companies. The scrape layer surfaces companies *before* they appear in venture press:
+
+| Channel Group | Example Targets | Why It's Proprietary |
+|---|---|---|
+| DOE program ecosystems | AI4IX, i2X, ConnectWERX, SBIR/STTR | Federal non-dilutive validation, pre-VC teams |
+| Specialist fund portfolios | Powerhouse, Stepchange, Convective, MCJ | These funds converge repeatedly on the fund's own comps — diffing their portfolio pages catches new checks before press |
+| Regional/state cohorts | NYSERDA, Urban Future Lab, The Clean Fight | NY-local, relationship-buildable |
+| Accelerator cohorts | Third Derivative, Elemental Impact, Greentown Labs | Low hit rate by design (one 2026 cohort was ~90% hardware) — the filter is what makes the channel valuable |
+| RTO/ISO market registrations | ERCOT, PJM | A software company registering as a market participant is a leading commercialization signal |
+
+**Proven results from this layer:** Glacian Technologies (university tech-transfer, Penn State) and GridBoost / ContractPower (DOE AI4IX teaming list) — none of which would have surfaced through the standard five-source pipeline.
+
+**Implementation status:** `scrape_targets` and `scrape_filters` are configured in `vertical_sources.py` with a working pre-filter (`passes_scrape_filter()`) that rejects hardware/materials companies by keyword before expensive enrichment runs. A dedicated `source_vertical_scrape()` fetcher (HTML parsing + run-over-run diffing) is **not yet built** — this is the next implementation step, not a live source today.
+
+### V21 Funding Range (Tighter Than Other Verticals)
+
+V21 enforces a stricter funding band than the pipeline-wide hard gates. Every vertical's candidates must clear the $15M/$10M ceilings below, but V21 candidates are further tiered by a **post-enrichment size filter** (`verify_size_post_enrichment()` in `pipeline_utils.py`):
+
+| Status | Range | Action |
+|---|---|---|
+| `REJECT` | > $10M verified | Removed from pipeline |
+| `ABOVE_RANGE` | $4M–$10M | Kept, flagged in sheet |
+| `IN_RANGE` | $1.8M–$4M | Ideal — genuine seed |
+| `BELOW_RANGE` | < $1.8M | Kept, flagged as earliest-stage |
+| `UNVERIFIED` | No confirmed figure | Kept, flagged for manual check |
+
+This exists because the pipeline's original hard gate runs *before* funding enrichment — a company can pass on a "seed" label alone when its real funding figure is still $0/missing, then turn out to have raised far more once enriched (e.g., a company labeled seed that had actually raised $68M). The post-enrichment filter re-checks size once real data exists and removes anything that slipped through on a missing-data technicality.
 
 ### Scoring
 
@@ -154,7 +196,7 @@ All three must pass or the company is excluded:
 |-----|----------|
 | Pipeline | All candidates scoring above threshold from main pipeline runs |
 | Vertical Pipeline | Candidates organized by vertical (V0–V20) |
-| Vertical Reference | V0–V20 schema reference with Second Layer logic and example companies |
+| Vertical Reference | V0–V21 schema reference with Second Layer logic and example companies |
 | Founder Pipeline | Direct founder sourcing and outreach tracking |
 | Pipeline Archive | Historical pipeline runs |
 | Company Pipeline | Extended company tracking |
@@ -173,7 +215,7 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 | Workflow | File | Schedule | Trigger |
 |----------|------|----------|---------|
 | Main Pipeline | `main_pipeline.yml` | Daily 12:00 UTC | Cron + manual |
-| Vertical Pipeline | `vertical_pipeline.yml` | Daily 13:00 UTC | Cron + manual (index 0–20) |
+| Vertical Pipeline | `vertical_pipeline.yml` | Daily 13:00 UTC | Cron + manual (index 0–21) |
 | Test APIs | `test_apis.yml` | Manual | GitHub Actions |
 
 ---
@@ -184,7 +226,7 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 /
 ├── sourcer.py              # Main sourcing logic (YC, SEC, TechCrunch, SBIR, HF, PH, HN, RSS, Claude)
 ├── vertical_pipeline.py    # Vertical pipeline runner (5 sources per vertical)
-├── vertical_sources.py     # V0–V20 vertical schema (keywords, RSS feeds, search terms)
+├── vertical_sources.py     # V0–V21 vertical schema (keywords, RSS feeds, search terms, V21 scrape targets)
 ├── pipeline_utils.py       # Scoring, gates, sheet writing, funding verification
 ├── test_apis.py            # API credential diagnostic
 ├── .github/
@@ -223,6 +265,9 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 | HN Show | ✅ Working | Main pipeline only |
 | Crustdata | ❌ Removed | Retired June 2026 |
 | GitHub Search | ⚠️ Skipped | Requires GITHUB_TOKEN secret |
+| V21 Scrape Layer | ⚠️ Configured, not live | `scrape_targets`/`scrape_filters` defined in `vertical_sources.py`; fetcher (`source_vertical_scrape()`) not yet implemented |
+
+**Funding data integrity (Aug 2026 fix):** the Claude Research sourcing step no longer asks the model to produce funding figures directly — it fabricated plausible-but-wrong numbers (e.g. recycling one company's raise onto another). Funding is now sourced only through the verification pass, which requires a citable source or returns null. Companies with unconfirmed funding are flagged `(UNVERIFIED)` in the sheet rather than shown with a bare number.
 
 ---
 
