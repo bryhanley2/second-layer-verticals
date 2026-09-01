@@ -84,7 +84,14 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 
 ## Pipeline Architecture
 
-### Main Pipeline Sources
+> **Scope of this repo:** this repository is the **vertical pipeline** only
+> (`vertical_pipeline.py`, per-vertical sourcing V0–V21). The broader
+> **Main Pipeline** (`sourcer.py` / `main_pipeline.yml` — a single cross-industry
+> daily run) lives in a **separate repository** and is not part of this codebase.
+> The Main Pipeline section below is retained for context on the overall system;
+> the `Pipeline` sheet tab it writes to is shared between both repos.
+
+### Main Pipeline Sources *(separate repo — reference only)*
 
 | Source | Frequency | Volume | Quality |
 |--------|-----------|--------|---------|
@@ -209,11 +216,12 @@ All three must pass or the company is excluded:
 | Tab | Contents |
 |-----|----------|
 | Pipeline | All candidates scoring above threshold from main pipeline runs |
-| Vertical Pipeline | Candidates organized by vertical (V0–V20) |
+| Vertical Pipeline | Candidates organized by vertical (V0–V21) |
 | Vertical Reference | V0–V21 schema reference with Second Layer logic and example companies |
 | Founder Pipeline | Direct founder sourcing and outreach tracking |
 | Pipeline Archive | Historical pipeline runs |
 | Company Pipeline | Extended company tracking |
+| V21 Scrape Seen | Run-over-run state for the V21 scrape layer (auto-created) |
 | Empty (copy paste) | Template tab |
 
 ### Pipeline Headers (26 columns)
@@ -228,9 +236,10 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 
 | Workflow | File | Schedule | Trigger |
 |----------|------|----------|---------|
-| Main Pipeline | `main_pipeline.yml` | Daily 12:00 UTC | Cron + manual |
-| Vertical Pipeline | `vertical_pipeline.yml` | Daily 13:00 UTC | Cron + manual (index 0–21) |
+| Vertical Pipeline | `vertical_pipeline.yml` | Daily 10:30 UTC | Cron + manual (index 0–21) |
 | Test APIs | `test_apis.yml` | Manual | GitHub Actions |
+
+*(The Main Pipeline workflow runs from its own repo.)*
 
 ---
 
@@ -238,18 +247,20 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 
 ```
 /
-├── sourcer.py              # Main sourcing logic (YC, SEC, TechCrunch, SBIR, HF, PH, HN, RSS, Claude)
-├── vertical_pipeline.py    # Vertical pipeline runner (5 sources per vertical)
+├── vertical_pipeline.py    # Vertical pipeline runner (sources 1–7 per vertical)
 ├── vertical_sources.py     # V0–V21 vertical schema (keywords, RSS feeds, search terms, V21 scrape targets)
-├── pipeline_utils.py       # Scoring, gates, sheet writing, funding verification
+├── new_sources.py          # YC Launch HN + Product Hunt sources, VC newsletter feed list
+├── pipeline_utils.py       # Model constant, gates, scoring, funding verification, sheet I/O, LLM-error tracking
 ├── test_apis.py            # API credential diagnostic
+├── sheets_logger_py        # Legacy alternate sheet writer — not wired in
 ├── .github/
 │   └── workflows/
-│       ├── main_pipeline.yml
 │       ├── vertical_pipeline.yml
 │       └── test_apis.yml
 └── README.md
 ```
+
+`sourcer.py` and `main_pipeline.yml` belong to the separate Main Pipeline repo.
 
 ---
 
