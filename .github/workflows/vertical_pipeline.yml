@@ -30,6 +30,8 @@ jobs:
           VERTICAL_INDEX: ${{ github.event.inputs.vertical_index }}
           # Optional: set repo variable PIPELINE_MODEL to pin/trial a model. Blank -> code default.
           PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
+          # Optional: set repo variable EXTRA_SOURCES to "0" to skip YC Launches / Product Hunt / VC newsletters.
+          EXTRA_SOURCES: ${{ vars.EXTRA_SOURCES }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}

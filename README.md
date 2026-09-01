@@ -100,7 +100,7 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 
 ### Vertical Pipeline Sources (V0–V21)
 
-The vertical pipeline runs per-vertical and uses five free sources, each filtered by the vertical's keywords:
+The vertical pipeline runs per-vertical and uses these free sources, each filtered by the vertical's keywords:
 
 | Source | How it's filtered | Notes |
 |--------|-------------------|-------|
@@ -109,6 +109,11 @@ The vertical pipeline runs per-vertical and uses five free sources, each filtere
 | TechCrunch | Vertical keywords + seed-stage terms | Venture/startups/seed-funding feeds |
 | Vertical RSS | Sector-specific publications | 2–5 feeds per vertical |
 | Claude Research | Vertical-specific search terms | Highest framework alignment |
+| YC Launch HN | Vertical keywords against the launch pitch | Last ~8 months of "Launch HN" posts, recent-batch only (`new_sources.py`) |
+| Product Hunt | Vertical keywords against title + tagline | ~50 newest products; mostly noise outside consumer/AI verticals (`new_sources.py`) |
+| VC Newsletters | Funding-headline extraction + vertical keywords | StrictlyVC, a16z, Newcomer, Not Boring, The Diff, … via the Vertical RSS parser |
+
+The last three run in STEP 1 unless `EXTRA_SOURCES=0` (env / repo variable).
 
 > **Note on V20 (Consumer Health & Wellness Brands):** This vertical sources primarily through CPG-specific RSS feeds (FoodNavigator-USA, BevNET, Nosh, Beauty Independent, Food Dive) and Claude Research. YC, SEC Form D, and SBIR sources contribute minimally for consumer brands but do not require separate infrastructure.
 
@@ -259,7 +264,9 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 | TechCrunch | ✅ Working | Venture/startups/seed-funding feeds |
 | SBIR/STTR | ✅ New | Government grant signal, keyword-filtered |
 | Hugging Face | ✅ New | Trending AI orgs, big labs filtered out |
-| Product Hunt | ✅ New | Daily leaders via RSS |
+| YC Launch HN | ✅ New | Recent "Launch HN" posts via HN Algolia, keyword + recent-batch filtered |
+| Product Hunt | ✅ New | ~50 newest products via Atom feed, keyword-filtered; strong only for consumer/AI verticals |
+| VC Newsletters | ✅ New | StrictlyVC / a16z / Newcomer / Not Boring / The Diff via the funding-headline RSS parser |
 | RSS Funding | ✅ Working | 2–3 sector feeds per vertical |
 | Claude Research | ✅ Working | 6–8 high-quality candidates/run |
 | HN Show | ✅ Working | Main pipeline only |

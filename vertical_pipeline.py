@@ -1,12 +1,14 @@
 """
 Second Layer Vertical Pipeline
 ================================================
-Runs on-demand for a specific vertical (0-20). Combines five free sources:
-  1. YC Companies   — yc-oss dataset filtered by vertical keywords + recent batch
-  2. SEC Form D     — EDGAR filings keyword-matched per vertical
-  3. TechCrunch     — venture/startup feeds keyword-filtered
-  4. Vertical RSS   — sector publications parsed for seed funding announcements
+Runs on-demand for a specific vertical (0-20). Combines free sources:
+  1. YC Companies    — yc-oss dataset filtered by vertical keywords + recent batch
+  2. SEC Form D      — EDGAR filings keyword-matched per vertical
+  3. TechCrunch      — venture/startup feeds keyword-filtered
+  4. Vertical RSS    — sector publications parsed for seed funding announcements
   5. Claude Research — vertical-targeted research prompts
+  6. Extra sources   — YC Launch HN posts, Product Hunt, VC newsletters
+                       (new_sources.py; set EXTRA_SOURCES=0 to skip)
 
 All candidates pass through the three hard gates before scoring, then the
 Second Layer thesis filter, then 9-factor scoring. Writes to the
@@ -38,8 +40,13 @@ from pipeline_utils import (
     record_llm_error, llm_error_count, llm_error_summary,
 )
 from vertical_sources import get_vertical, get_vertical_by_day_of_year
+from new_sources import source_yc_launches, source_producthunt, VC_NEWSLETTER_FEEDS
 
 VERTICAL_TAB = "Vertical Pipeline"
+
+# Extra early-signal sources (YC Launches, Product Hunt, VC newsletters) run in
+# STEP 1 unless EXTRA_SOURCES=0.
+EXTRA_SOURCES_ENABLED = os.environ.get("EXTRA_SOURCES", "1").strip() != "0"
 
 # Recent YC batches considered "early enough" for the stage gate.
 # Adjust as new batches are announced.
@@ -360,6 +367,62 @@ is real, skip it entirely. Return ONLY JSON lines, nothing else."""
 
 
 # ============================================================================
+# Source 6: extra early-signal sources (new_sources.py)
+# ============================================================================
+def _adapt_extra_record(raw: dict, vertical_name: str) -> dict:
+    """Map a new_sources.py record onto the full candidate shape.
+
+    Funding is left at 0 / unverified — identical to how YC, SEC and Claude
+    Research candidates enter the pipeline; the Step 1b verification pass and the
+    post-enrichment size re-check populate and validate the real figure.
+    """
+    return {
+        "name": str(raw.get("name", "")).strip()[:80],
+        "website": raw.get("url", ""),
+        "description": str(raw.get("description", ""))[:500],
+        "industry": vertical_name,
+        "hq_city": "",
+        "hq_country": "United States",
+        "founded_date": "",
+        "headcount": 0,
+        "total_funding_usd": 0,
+        "_funding_unverified": True,
+        "last_funding_round": "seed",
+        "last_funding_date": "",
+        "linkedin_url": "",
+        "yc_batch": raw.get("yc_batch", ""),
+        "_source": raw.get("source", "extra source"),
+    }
+
+
+def source_extra(vertical: dict) -> list:
+    """YC Launches + Product Hunt + VC newsletters, adapted to candidate shape.
+
+    - YC Launch records are dropped if their batch is older than RECENT_YC_BATCHES
+      (same recency bar the main YC source applies).
+    - VC newsletter feeds are run through source_vertical_rss(), which already
+      does "<Company> raises $<N>" headline extraction + seed-stage filtering.
+    """
+    name = vertical["name"]
+    out = []
+
+    yc = [_adapt_extra_record(r, name) for r in source_yc_launches(vertical)]
+    yc = [c for c in yc if not c["yc_batch"] or c["yc_batch"] in RECENT_YC_BATCHES]
+    print(f"[YC Launches] {len(yc)} candidates")
+
+    ph = [_adapt_extra_record(r, name) for r in source_producthunt(vertical)]
+    print(f"[Product Hunt] {len(ph)} candidates")
+
+    nl = source_vertical_rss(VC_NEWSLETTER_FEEDS, name)
+    print(f"[VC Newsletters] {len(nl)} candidates")
+
+    out.extend(yc)
+    out.extend(ph)
+    out.extend(nl)
+    return out
+
+
+# ============================================================================
 # Funding verification for $0-funding candidates (YC + RSS fallbacks)
 # ============================================================================
 def _crunchbase_lookup(company_name: str) -> dict:
@@ -643,6 +706,10 @@ def main():
     candidates.extend(source_techcrunch(keywords, name))
     candidates.extend(source_vertical_rss(rss_feeds, name))
     candidates.extend(source_vertical_claude_research(ai_client, search_terms, name))
+    if EXTRA_SOURCES_ENABLED:
+        candidates.extend(source_extra(vertical))
+    else:
+        print("[extra sources] skipped (EXTRA_SOURCES=0)")
     print(f"\nTotal raw: {len(candidates)}")
 
     # Step 1b: Verify funding for $0 candidates before gating
