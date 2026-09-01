@@ -120,7 +120,7 @@ def passes_stage_gate(candidate: dict):
 def passes_funding_gate(candidate: dict):
     total = safe_float(candidate.get("total_funding_usd", 0))
     # If funding is 0 or missing, only pass if stage is explicitly pre-seed/seed
-    # to avoid letting well-funded companies through with blank Crustdata fields.
+    # to avoid letting well-funded companies through on blank/missing funding fields.
     if total == 0:
         stage = str(candidate.get("last_funding_round", "") or candidate.get("stage", "")).strip().lower()
         if stage in {"pre-seed", "preseed", "seed", "angel", "grant", "accelerator", ""}:
@@ -420,7 +420,7 @@ def write_scored_candidates(client, tab_name: str, scored: list, vertical_label:
             cand.get("last_funding_round", cand.get("stage", "")),
             funding_display,
             vertical_label or cand.get("industry", ""),
-            cand.get("_source", "Crustdata"),
+            cand.get("_source", "unknown"),
             c.get("sl_reason", ""),
             str(cand.get("description", ""))[:400],
             "Yes",

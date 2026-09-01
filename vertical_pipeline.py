@@ -1,8 +1,8 @@
 """
-Second Layer Vertical Pipeline (Crustdata-free)
+Second Layer Vertical Pipeline
 ================================================
-Runs on-demand for a specific vertical (0-20). Combines five sources:
-  1. YC Companies   — filtered by vertical keywords (replaces Crustdata)
+Runs on-demand for a specific vertical (0-20). Combines five free sources:
+  1. YC Companies   — yc-oss dataset filtered by vertical keywords + recent batch
   2. SEC Form D     — EDGAR filings keyword-matched per vertical
   3. TechCrunch     — venture/startup feeds keyword-filtered
   4. Vertical RSS   — sector publications parsed for seed funding announcements
@@ -46,12 +46,12 @@ RECENT_YC_BATCHES = {"W23", "S23", "W24", "S24", "F24", "W25", "S25", "F25", "X2
 
 
 # ============================================================================
-# Source 1: YC Companies (replaces Crustdata)
+# Source 1: YC Companies
 # ============================================================================
 def source_vertical_yc(keywords: list, vertical_name: str) -> list:
     """
     Pull the full YC company dataset (yc-oss) and filter by vertical keywords.
-    This is the free, structured replacement for the Crustdata cache.
+    Free, structured, and refreshed by yc-oss on every YC batch.
     """
     candidates = []
     url = "https://yc-oss.github.io/api/companies/all.json"
@@ -631,7 +631,7 @@ def main():
     sheet_client = get_sheet_client()
     ai_client = get_anthropic_client()
 
-    # Step 1: Source collection (Crustdata removed)
+    # Step 1: Source collection
     print("STEP 1: Pulling from vertical-specific sources")
     print("-" * 60)
     candidates = []

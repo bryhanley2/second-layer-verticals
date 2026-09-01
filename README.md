@@ -263,7 +263,6 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 | RSS Funding | ✅ Working | 2–3 sector feeds per vertical |
 | Claude Research | ✅ Working | 6–8 high-quality candidates/run |
 | HN Show | ✅ Working | Main pipeline only |
-| Crustdata | ❌ Removed | Retired June 2026 |
 | GitHub Search | ⚠️ Skipped | Requires GITHUB_TOKEN secret |
 | V21 Scrape Layer | ⚠️ Configured, not live | `scrape_targets`/`scrape_filters` defined in `vertical_sources.py`; fetcher (`source_vertical_scrape()`) not yet implemented |
 
