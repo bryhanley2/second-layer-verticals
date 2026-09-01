@@ -119,8 +119,9 @@ The vertical pipeline runs per-vertical and uses these free sources, each filter
 | YC Launch HN | Vertical keywords against the launch pitch | Last ~8 months of "Launch HN" posts, recent-batch only (`new_sources.py`) |
 | Product Hunt | Vertical keywords against title + tagline | ~50 newest products; mostly noise outside consumer/AI verticals (`new_sources.py`) |
 | VC Newsletters | Funding-headline extraction + vertical keywords | StrictlyVC, a16z, Newcomer, Not Boring, The Diff, … via the Vertical RSS parser |
+| Scrape layer | Claude extraction from the vertical's `scrape_targets` + run-over-run diff | Specialist-fund portfolios / accelerator cohorts; 15 of 22 verticals (see **Proprietary Scrape Layer** below) |
 
-The last three run in STEP 1 unless `EXTRA_SOURCES=0` (env / repo variable).
+YC Launch HN / Product Hunt / VC Newsletters run in STEP 1 unless `EXTRA_SOURCES=0`; the scrape layer unless `SCRAPE_LAYER=0`.
 
 > **Note on V20 (Consumer Health & Wellness Brands):** This vertical sources primarily through CPG-specific RSS feeds (FoodNavigator-USA, BevNET, Nosh, Beauty Independent, Food Dive) and Claude Research. YC, SEC Form D, and SBIR sources contribute minimally for consumer brands but do not require separate infrastructure.
 
@@ -132,30 +133,42 @@ All $0-funding candidates pass a **multi-source funding verification step** befo
 
 Every candidate carries a `_funding_checks` audit trail. A verified figure ships with its source URL; an unverified one ships with exactly what was tried (`unverified (checked crunchbase: no key; sec form d: no filing; claude: no source)`) so the analyst knows what to check by hand.
 
-### Proprietary Sourcing Layer (V21 Only)
+### Proprietary Scrape Layer
 
-V21 uses everything above **plus an 18-target scrape layer** the other 21 verticals don't have. The five-source list above is press-and-announcement based — every fund scraping YC and TechCrunch sees the same companies. The scrape layer surfaces companies *before* they appear in venture press:
+The sources above are press-and-announcement based — every fund scraping YC and TechCrunch sees the same companies. Each vertical with a `scrape_targets` list also gets a scrape pass that surfaces companies *before* they appear in venture press, by diffing specialist-fund portfolios / accelerator cohorts / program awardee lists run over run.
 
-| Channel Group | Example Targets | Why It's Proprietary |
-|---|---|---|
-| DOE program ecosystems | AI4IX, i2X, ConnectWERX, SBIR/STTR | Federal non-dilutive validation, pre-VC teams |
-| Specialist fund portfolios | Powerhouse, Stepchange, Convective, MCJ | These funds converge repeatedly on the fund's own comps — diffing their portfolio pages catches new checks before press |
-| Regional/state cohorts | NYSERDA, Urban Future Lab, The Clean Fight | NY-local, relationship-buildable |
-| Accelerator cohorts | Third Derivative, Elemental Impact, Greentown Labs | Low hit rate by design (one 2026 cohort was ~90% hardware) — the filter is what makes the channel valuable |
-| RTO/ISO market registrations | ERCOT, PJM | A software company registering as a market participant is a leading commercialization signal |
+**Coverage (15 of 22 verticals, ~55 targets):**
 
-**Proven results from this layer:** Glacian Technologies (university tech-transfer, Penn State) and GridBoost / ContractPower (DOE AI4IX teaming list) — none of which would have surfaced through the standard five-source pipeline.
+| Vertical | Example targets |
+|---|---|
+| V0 Energy/Climate | Congruent, Lowercarbon, Clean Energy Ventures, EIP |
+| V2 Fintech | QED, Nyca, Commerce Ventures |
+| V3 Space | Space Capital, Seraphim |
+| V5 Biotech/Medtech | IndieBio, Nucleate, Petri |
+| V6 Supply Chain | Dynamo, Interlace, 4DX |
+| V8 Cybersecurity | Ten Eleven, YL Ventures, ForgePoint, NightDragon, SYN |
+| V9 Insurance/RE | Fifth Wall, MetaProp |
+| V10 Healthcare | Rock Health, .406 Ventures |
+| V11 Agtech | AgFunder, S2G, Fall Line |
+| V13 AI Agents | Air Street, Basis |
+| V16 Defense | a16z American Dynamism, 8VC, Decisive Point |
+| V17 Robotics | Eclipse, Lux |
+| V18 Elder Care | Primetime Partners, Ziegler Link-Age |
+| V20 Consumer CPG | XRC Labs, Springdale |
+| **V21** AI Physical Infra | DOE AI4IX/i2X, Powerhouse, Stepchange, MCJ, NYSERDA, Third Derivative, Elemental, Greentown, ERCOT, PJM (17 targets) |
 
-**Implementation status:** live. `source_vertical_scrape()` in `vertical_pipeline.py`:
+**Proven results (V21):** Glacian Technologies (Penn State tech-transfer), GridBoost / ContractPower (DOE AI4IX teaming list) — none would have surfaced through the standard sources.
 
-1. Fetches each `scrape_target` — static `requests` GET first, then a **headless Chromium render (Playwright)** when the static result is a JS shell — and reduces it to visible text + an anchor-text/href list.
-2. Claude extracts operating-company names from each page (skips nav, fund names, report titles; text-only, no inference).
-3. `passes_scrape_filter()` drops hardware/materials companies by keyword.
-4. Diffs the results against the **`V21 Scrape Seen`** sheet tab — only names *not seen in a prior run* enter the pipeline. Every surfaced name is recorded to that tab immediately, so a company that later fails the gates isn't re-extracted each run. First run (empty tab) is capped at `V21_SCRAPE_MAX_NEW` (default 50).
+**How `source_vertical_scrape()` works:**
 
-Surviving candidates flow through the normal gates → funding verification → Second Layer filter → 9-factor scoring like any other source. Disable the whole layer with `V21_SCRAPE=0`, or just the headless fallback with `V21_SCRAPE_HEADLESS=0`.
+1. Fetch each `scrape_target` — static `requests` GET first, then a **headless Chromium render (Playwright)** when the static result is a JS shell.
+2. Claude extracts operating-company names from each page (skips nav, fund names, report titles; text-only, no inference; the vertical's name + keywords steer it).
+3. `passes_scrape_filter()` drops rejects by keyword; block/parked pages are skipped before spending a Claude call.
+4. Diff against the **`Scrape Seen`** sheet tab — only names *not seen in a prior run* enter the pipeline. Every surfaced name is recorded immediately, so a company that later fails the gates isn't re-extracted. First run per vertical is capped at `SCRAPE_MAX_NEW` (default 50).
 
-**Headless fetch** requires `playwright` + `playwright install chromium` (the workflow does both, with a browser cache). Verified live: Stepchange and MCJ portfolios (React SPAs) now yield real companies — Shovels, Bayou Energy, DG Matrix, etc. Targets that are parked / bot-blocked / origin-down (convective.vc removed; Powerhouse, Urban Future Lab) still return nothing and are skipped gracefully.
+Survivors flow through the normal gates → funding verification → Second Layer filter → 9-factor scoring. Disable the layer with `SCRAPE_LAYER=0`, the headless fallback with `SCRAPE_HEADLESS=0` (legacy `V21_SCRAPE*` names still work).
+
+**Headless fetch** needs `playwright` + `playwright install chromium` (the workflow does both, cached). Verified live: 38/38 non-V21 targets + 15/17 V21 targets return usable content; parked/bot-blocked ones (Powerhouse, Urban Future Lab) are skipped gracefully.
 
 ### V21 Funding Range (Tighter Than Other Verticals)
 
@@ -228,7 +241,7 @@ All three must pass or the company is excluded:
 | Founder Pipeline | Direct founder sourcing and outreach tracking |
 | Pipeline Archive | Historical pipeline runs |
 | Company Pipeline | Extended company tracking |
-| V21 Scrape Seen | Run-over-run state for the V21 scrape layer (auto-created) |
+| Scrape Seen | Run-over-run state for the scrape layer (auto-created) |
 | Empty (copy paste) | Template tab |
 
 ### Pipeline Headers (26 columns)
@@ -340,7 +353,7 @@ Set `ENRICH_CONTACTS=0` to skip the lookup.
 | Claude Research | ✅ Working | 6–8 high-quality candidates/run |
 | HN Show | ✅ Working | Main pipeline only |
 | GitHub Search | ⚠️ Skipped | Requires GITHUB_TOKEN secret |
-| V21 Scrape Layer | ✅ Live (static + headless) | `source_vertical_scrape()` — static/Playwright fetch + Claude extraction + hardware filter + run-over-run diff via the `V21 Scrape Seen` tab. |
+| Scrape Layer | ✅ Live (static + headless) | `source_vertical_scrape()` — 15/22 verticals with `scrape_targets`; static/Playwright fetch + Claude extraction + filter + run-over-run diff via the `Scrape Seen` tab. |
 
 **Funding data integrity (Aug 2026 fix):** the Claude Research sourcing step no longer asks the model to produce funding figures directly — it fabricated plausible-but-wrong numbers (e.g. recycling one company's raise onto another). Funding is now sourced only through the verification pass, which requires a citable source or returns null. Companies with unconfirmed funding are flagged `(UNVERIFIED)` in the sheet rather than shown with a bare number.
 

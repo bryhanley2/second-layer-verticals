@@ -50,11 +50,11 @@ jobs:
           PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
           # Optional: set repo variable EXTRA_SOURCES to "0" to skip YC Launches / Product Hunt / VC newsletters.
           EXTRA_SOURCES: ${{ vars.EXTRA_SOURCES }}
-          # Optional: V21_SCRAPE="0" skips the V21 scrape layer; V21_SCRAPE_MAX_NEW caps new companies per run.
-          V21_SCRAPE: ${{ vars.V21_SCRAPE }}
-          V21_SCRAPE_MAX_NEW: ${{ vars.V21_SCRAPE_MAX_NEW }}
-          # Optional: V21_SCRAPE_HEADLESS="0" forces static-only fetch (no Chromium fallback).
-          V21_SCRAPE_HEADLESS: ${{ vars.V21_SCRAPE_HEADLESS }}
+          # Optional: SCRAPE_LAYER="0" skips the scrape layer; SCRAPE_MAX_NEW caps new companies per run;
+          # SCRAPE_HEADLESS="0" forces static-only fetch (no Chromium fallback).
+          SCRAPE_LAYER: ${{ vars.SCRAPE_LAYER }}
+          SCRAPE_MAX_NEW: ${{ vars.SCRAPE_MAX_NEW }}
+          SCRAPE_HEADLESS: ${{ vars.SCRAPE_HEADLESS }}
           # Optional: ENRICH_CONTACTS="0" skips the website email lookup; DIGEST_TOP_N sets how many go in the email.
           ENRICH_CONTACTS: ${{ vars.ENRICH_CONTACTS }}
           DIGEST_TOP_N: ${{ vars.DIGEST_TOP_N }}

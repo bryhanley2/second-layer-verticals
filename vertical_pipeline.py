@@ -9,8 +9,9 @@ Runs on-demand for a specific vertical (0-20). Combines free sources:
   5. Claude Research — vertical-targeted research prompts
   6. Extra sources   — YC Launch HN posts, Product Hunt, VC newsletters
                        (new_sources.py; set EXTRA_SOURCES=0 to skip)
-  7. V21 scrape      — V21 only: HTML scrape_targets + run-over-run diff
-                       (set V21_SCRAPE=0 to skip)
+  7. Scrape layer    — verticals with scrape_targets: HTML fetch (static +
+                       headless) + Claude extraction + run-over-run diff
+                       (set SCRAPE_LAYER=0 to skip)
 
 After scoring, the top DIGEST_TOP_N candidates get a website-only contact
 lookup (public email + LinkedIn; ENRICH_CONTACTS=0 to skip) and an outreach
@@ -67,15 +68,15 @@ ON_DEMAND_TAB = "On-Demand Pipeline"
 # STEP 1 unless EXTRA_SOURCES=0.
 EXTRA_SOURCES_ENABLED = os.environ.get("EXTRA_SOURCES", "1").strip() != "0"
 
-# V21 proprietary scrape layer (HTML targets + run-over-run diff). Only V21
-# defines scrape_targets, so this is a no-op for every other vertical. Set
-# V21_SCRAPE=0 to skip it even for V21.
-V21_SCRAPE_ENABLED = os.environ.get("V21_SCRAPE", "1").strip() != "0"
-SCRAPE_STATE_TAB = "V21 Scrape Seen"
+# Proprietary scrape layer (HTML targets + run-over-run diff). Runs for any
+# vertical that defines scrape_targets; a no-op for the rest. Set SCRAPE_LAYER=0
+# (legacy alias: V21_SCRAPE=0) to skip it entirely.
+SCRAPE_LAYER_ENABLED = (os.environ.get("SCRAPE_LAYER") or os.environ.get("V21_SCRAPE") or "1").strip() != "0"
+SCRAPE_STATE_TAB = "Scrape Seen"
 # Cap on how many never-before-seen companies one scrape run pushes into the
 # pipeline — protects the first run (empty state) from processing whole portfolios.
 try:
-    SCRAPE_MAX_NEW = int(os.environ.get("V21_SCRAPE_MAX_NEW") or "50")
+    SCRAPE_MAX_NEW = int(os.environ.get("SCRAPE_MAX_NEW") or os.environ.get("V21_SCRAPE_MAX_NEW") or "50")
 except ValueError:
     SCRAPE_MAX_NEW = 50
 
@@ -462,23 +463,23 @@ def source_extra(vertical: dict) -> list:
 
 
 # ============================================================================
-# Source 7: V21 proprietary scrape layer
+# Source 7: proprietary scrape layer
 # ============================================================================
-# The five/six sources above are press-and-announcement based — every fund
-# scraping YC and TechCrunch sees the same companies. The V21 scrape_targets
-# (DOE program ecosystems, specialist-fund portfolios, accelerator cohorts,
-# RTO/ISO registries) surface companies BEFORE they hit venture press.
+# The sources above are press-and-announcement based — every fund scraping YC
+# and TechCrunch sees the same companies. A vertical's scrape_targets
+# (specialist-fund portfolios, accelerator cohorts, program awardee lists,
+# market registries) surface companies BEFORE they hit venture press.
 #
 # Flow: fetch each target's HTML -> reduce to visible text + link list ->
-# Claude extracts company names -> passes_scrape_filter() drops hardware ->
-# diff against the "V21 Scrape Seen" tab so only NEW names enter the pipeline.
+# Claude extracts company names -> passes_scrape_filter() drops rejects ->
+# diff against the "Scrape Seen" tab so only NEW names enter the pipeline.
 #
 # Fetch is static (requests) first; a page that comes back as a JS shell is
 # re-fetched with headless Chromium (Playwright) when available. Set
-# V21_SCRAPE_HEADLESS=0 to force static-only.
+# SCRAPE_HEADLESS=0 to force static-only.
 
 _SCRAPE_UA = "Mozilla/5.0 (compatible; SecondLayerVC-research/1.0; +https://bryanhanleyvc.substack.com)"
-V21_SCRAPE_HEADLESS = os.environ.get("V21_SCRAPE_HEADLESS", "1").strip() != "0"
+SCRAPE_HEADLESS = (os.environ.get("SCRAPE_HEADLESS") or os.environ.get("V21_SCRAPE_HEADLESS") or "1").strip() != "0"
 _HEADLESS_STATE = None  # None = untried, True = works, False = unavailable
 
 # Drop non-content blocks (incl. their contents) before extracting text.
@@ -556,7 +557,7 @@ def _fetch_page_text(url: str, timeout: int = 20) -> str:
     text = _html_to_text(raw) if raw else ""
     if text and not _looks_js_rendered(text):
         return text
-    if V21_SCRAPE_HEADLESS:
+    if SCRAPE_HEADLESS:
         rendered = _render_fetch(url)
         if rendered:
             rendered_text = _html_to_text(rendered)
@@ -584,15 +585,17 @@ def _extract_companies_from_page(ai_client, url: str, page_text: str, vertical: 
     Returns list of {name, website, note}. [] on error or empty page."""
     if len(page_text.strip()) < 250:
         return []
+    thesis = vertical.get("second_layer_logic", "")
+    kw = ", ".join((vertical.get("keywords") or [])[:12])
     prompt = f"""Text scraped from: {url}
 
 This page is expected to list startups / companies — a VC portfolio, an
 accelerator cohort, a government program's awardee or teaming list, or a
 market-participant registry.
 
-Extract every entry that is an operating company/startup in or adjacent to:
-"{vertical['name']}" — asset-light SOFTWARE for the energy, grid, and
-data-center-power buildout.
+Extract every entry that is an operating company/startup in or adjacent to
+this vertical: "{vertical['name']}".{(' Context: ' + thesis) if thesis else ''}
+Relevant terms: {kw}
 
 STRICT RULES:
 - Real company names only. Skip nav items, section headers, people's names,
@@ -613,7 +616,7 @@ Return ONE JSON object per line and nothing else:
         )
         text = resp.content[0].text.strip()
     except Exception as e:
-        record_llm_error(f"V21 scrape extraction {url}", e)
+        record_llm_error(f"scrape extraction {url}", e)
         return []
 
     out = []
@@ -636,18 +639,18 @@ Return ONE JSON object per line and nothing else:
 
 
 def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
-    """V21 proprietary scrape layer. Returns candidate-shaped dicts for
-    companies found on scrape_targets that were NOT seen in a prior run.
+    """Proprietary scrape layer. Returns candidate-shaped dicts for companies
+    found on this vertical's scrape_targets that were NOT seen in a prior run.
     No-op (returns []) for any vertical without scrape_targets."""
     targets = get_scrape_targets(vertical)
     if not targets:
         return []
 
-    print(f"[V21 scrape] {len(targets)} targets")
+    print(f"[scrape] {len(targets)} targets")
     seen = read_existing_names(sheet_client, SCRAPE_STATE_TAB)  # lowercased set
     first_run = not seen
     if first_run:
-        print("[V21 scrape] no prior state — first run will record targets without flooding "
+        print("[scrape] no prior state — first run will record targets without flooding "
               f"the pipeline (cap {SCRAPE_MAX_NEW})")
 
     new_hits = {}  # name_lower -> (name, website, note, source_url)
@@ -666,11 +669,11 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
                 continue
             new_hits[key] = (c["name"], c["website"], c["note"], url)
 
-    print(f"[V21 scrape] {len(new_hits)} new companies after dedup + hardware filter")
+    print(f"[scrape] {len(new_hits)} new companies after dedup + filter")
 
     selected = list(new_hits.values())[:SCRAPE_MAX_NEW]
     if len(new_hits) > SCRAPE_MAX_NEW:
-        print(f"[V21 scrape] capping at {SCRAPE_MAX_NEW}; remaining will surface next run")
+        print(f"[scrape] capping at {SCRAPE_MAX_NEW}; remaining will surface next run")
 
     # Record every selected name as seen BEFORE gating/scoring, so a company that
     # fails downstream isn't re-extracted every run. The seen tab is cheap to prune.
@@ -686,19 +689,19 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
 
 
 def _record_scrape_seen(sheet_client, rows: list) -> None:
-    """Append (name, source_url, note) rows to the V21 Scrape Seen tab."""
+    """Append (name, source_url, note) rows to the Scrape Seen tab."""
     if not rows:
         return
     try:
         tab = ensure_tab(
             sheet_client, SCRAPE_STATE_TAB,
-            headers=["Company", "First Seen", "Source URL", "Note"], cols=4,
+            headers=["Company", "First Seen", "Source URL", "Note"], rows=5000, cols=4,
         )
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         tab.append_rows([[n, now, u, note] for (n, u, note) in rows])
-        print(f"[V21 scrape] recorded {len(rows)} names to '{SCRAPE_STATE_TAB}'")
+        print(f"[scrape] recorded {len(rows)} names to '{SCRAPE_STATE_TAB}'")
     except Exception as e:
-        print(f"[V21 scrape] could not update '{SCRAPE_STATE_TAB}': {e}")
+        print(f"[scrape] could not update '{SCRAPE_STATE_TAB}': {e}")
 
 
 # ============================================================================
@@ -1186,10 +1189,10 @@ def main():
         candidates.extend(source_extra(vertical))
     else:
         print("[extra sources] skipped (EXTRA_SOURCES=0)")
-    if V21_SCRAPE_ENABLED:
+    if SCRAPE_LAYER_ENABLED:
         candidates.extend(source_vertical_scrape(ai_client, sheet_client, vertical))
     elif get_scrape_targets(vertical):
-        print("[V21 scrape] skipped (V21_SCRAPE=0)")
+        print("[scrape] skipped (SCRAPE_LAYER=0)")
     print(f"\nTotal raw: {len(candidates)}")
 
     # Step 1b: Verify funding for $0 candidates before gating

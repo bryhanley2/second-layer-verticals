@@ -22,6 +22,14 @@ VERTICALS = [
             "grid software energy seed funding announced",
             "carbon management startup seed round",
         ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.congruentvc.com/portfolio",
+            "https://lowercarboncapital.com/companies",
+            "https://www.cleanenergyventures.com/portfolio/",
+            "https://www.energyimpactpartners.com/portfolio/",
+        ],
     },
     {
         "id": 1,
@@ -44,6 +52,13 @@ VERTICALS = [
             "AML KYC startup seed funding announced",
             "payments fraud startup seed round",
         ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.qedinvestors.com/companies",
+            "https://www.nyca.com/portfolio",
+            "https://www.commerce.vc/portfolio",
+        ],
     },
     {
         "id": 3,
@@ -54,6 +69,12 @@ VERTICALS = [
             "space tech startup seed round funding",
             "maritime ocean tech seed funding announced",
             "satellite servicing debris startup seed round",
+        ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.spacecapital.com/portfolio",
+            "https://seraphim.vc/portfolio",
         ],
     },
     {
@@ -77,6 +98,13 @@ VERTICALS = [
             "clinical trials technology seed round announced",
             "life sciences compliance startup seed funding",
         ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.indiebio.co/portfolio",
+            "https://nucleate.org/",
+            "https://petri.bio/",
+        ],
     },
     {
         # SPLIT from old V6 — now standalone
@@ -88,6 +116,13 @@ VERTICALS = [
             "supply chain visibility startup seed funding",
             "logistics freight software seed round announced",
             "procurement traceability startup seed funding",
+        ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.dynamo.vc/portfolio",
+            "https://interlacevc.com/portfolio",
+            "https://www.4dxventures.com/portfolio",
         ],
     },
     {
@@ -113,6 +148,15 @@ VERTICALS = [
             "threat detection SOC startup seed funding",
             "cloud security startup seed round announced",
         ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.1011vc.com/portfolio",
+            "https://www.ylventures.com/portfolio/",
+            "https://forgepointcap.com/portfolio/",
+            "https://www.nightdragon.com/portfolio",
+            "https://synventures.com/portfolio/",
+        ],
     },
     {
         # Was V8 in old schema
@@ -124,6 +168,12 @@ VERTICALS = [
             "insurtech startup seed round funding 2026",
             "AI underwriting claims automation seed funding",
             "real estate construction tech seed round announced",
+        ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.fifthwall.com/companies",
+            "https://metaprop.com/portfolio/",
         ],
     },
     {
@@ -137,6 +187,12 @@ VERTICALS = [
             "care navigation EHR startup seed round announced",
             "prior authorization automation startup seed funding",
         ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://rockhealth.com/portfolio/",
+            "https://www.406ventures.com/companies",
+        ],
     },
     {
         # SPLIT from old V9 — now standalone
@@ -148,6 +204,13 @@ VERTICALS = [
             "agtech precision agriculture startup seed funding",
             "food traceability safety startup seed round",
             "farm management software seed funding announced",
+        ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://agfunder.com/portfolio/",
+            "https://www.s2gventures.com/portfolio",
+            "https://www.falllinecapital.com/portfolio/",
         ],
     },
     {
@@ -170,6 +233,12 @@ VERTICALS = [
             "AI agent infrastructure startup seed funding 2026",
             "agent authentication payments orchestration seed round",
             "agentic workflow tooling startup seed funding",
+        ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://airstreet.com/portfolio",
+            "https://www.basis.vc/",
         ],
     },
     {
@@ -205,6 +274,13 @@ VERTICALS = [
             "export control software startup seed round",
             "defense supply chain security startup seed funding",
         ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://a16z.com/american-dynamism/",
+            "https://8vc.com/companies",
+            "https://decisivepoint.com/portfolio/",
+        ],
     },
     {
         # NET NEW — robotics adoption creates integration/safety second layer
@@ -217,6 +293,12 @@ VERTICALS = [
             "robot fleet management orchestration seed round",
             "warehouse automation enablement startup seed funding",
         ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.eclipse.vc/companies",
+            "https://luxcapital.com/companies",
+        ],
     },
     {
         # NET NEW — aging demographics create care infrastructure second layer
@@ -228,6 +310,12 @@ VERTICALS = [
             "elder care coordination startup seed funding",
             "home care operations software seed round announced",
             "senior benefits navigation startup seed funding",
+        ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://primetimepartners.com/portfolio/",
+            "https://www.ziegler.com/ziegler-link-age-fund/",
         ],
     },
     {
@@ -260,6 +348,12 @@ VERTICALS = [
             "clean label wellness brand seed funding raised",
             "non-alcoholic beverage startup seed round raised",
             "protein snack brand bootstrapped raising seed round",
+        ],
+        "scrape_targets": [
+            # specialist-fund portfolios / accelerator cohorts for this vertical;
+            # diffed run-over-run so new additions surface before venture press
+            "https://www.xrclabs.com/portfolio",
+            "https://springdaleventures.com/portfolio/",
         ],
     },
     {
