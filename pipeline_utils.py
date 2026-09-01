@@ -13,6 +13,7 @@ Import this from other pipeline files:
 
 import os
 import sys
+import re
 import json
 from datetime import datetime, timezone
 import anthropic
@@ -36,6 +37,9 @@ ALLOWED_STAGES = {
 MAX_TOTAL_FUNDING = 10_000_000
 MAX_COMPANY_AGE_YEARS = 5
 MAX_MONTHS_SINCE_LAST_ROUND = 24
+# A verified funding figure whose round date is older than this gets a STALE
+# advisory — a newer round we didn't catch may have raised the real total.
+STALE_FUNDING_MONTHS = 15
 
 # Tightened thesis range for post-enrichment verification.
 # The initial gate uses MAX_TOTAL_FUNDING ($10M) as a hard ceiling, but the thesis
@@ -261,6 +265,99 @@ def verify_size_post_enrichment(candidate: dict):
         )
 
     return "IN_RANGE", f"IN target range — ${total:,.0f} within ${TARGET_FUNDING_FLOOR:,.0f}-${TARGET_FUNDING_CEILING:,.0f} sweet spot"
+
+
+# ---------- Funding-report confirmation ----------
+_MONEY_RE = re.compile(r"\$\s?([\d,]+)")
+
+
+def _figures_from_checks(checks) -> dict:
+    """Pull {source_kind: usd} out of the _funding_checks audit strings.
+    source_kind is one of crunchbase / sec / claude / other."""
+    out = {}
+    for line in checks or []:
+        m = _MONEY_RE.search(str(line))
+        if not m:
+            continue
+        try:
+            val = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if val <= 0:
+            continue
+        low = str(line).lower()
+        kind = ("crunchbase" if low.startswith("crunchbase")
+                else "sec" if "sec form d" in low
+                else "claude" if low.startswith("claude")
+                else "other")
+        out[kind] = max(out.get(kind, 0.0), val)
+    return out
+
+
+def confirm_funding_report(candidate: dict):
+    """Cross-check a *verified* funding figure for internal consistency, AFTER
+    verify_zero_funding has run. Mutates the candidate: non-OK verdicts append to
+    _funding_checks and downgrade _funding_confidence; an unresolvable CONFLICT
+    clears the figure back to $0/unverified.
+
+    Verdicts: OK | CONFLICT | STAGE_MISMATCH | STALE. Returns (verdict, note).
+    Companies with no figure (total == 0) return ("OK", ...) — nothing to confirm.
+    """
+    candidate.setdefault("_funding_checks", [])
+    total = safe_float(candidate.get("total_funding_usd", 0))
+    if total <= 0:
+        return "OK", "no figure to confirm"
+
+    notes, verdict = [], "OK"
+
+    # 1. Cross-source agreement --------------------------------------------------
+    figs = _figures_from_checks(candidate.get("_funding_checks"))
+    if len(figs) >= 2:
+        lo, hi = min(figs.values()), max(figs.values())
+        if hi - lo > 1_000_000 and hi > lo * 1.5:
+            pairs = ", ".join(f"${v:,.0f} ({k})" for k, v in sorted(figs.items()))
+            if "sec" in figs:
+                # SEC Form D is a legal filing — trust it, keep the company, flag it.
+                candidate["total_funding_usd"] = figs["sec"]
+                total = figs["sec"]
+                candidate["_funding_source"] = candidate.get("_funding_source") or "SEC Form D"
+                notes.append(f"sources disagree ({pairs}) — using the SEC figure")
+                verdict = "CONFLICT"
+            else:
+                notes.append(f"sources disagree ({pairs}) with no authoritative source — cleared to unverified")
+                candidate["total_funding_usd"] = 0
+                candidate["_funding_unverified"] = True
+                candidate["_funding_confidence"] = "unverified"
+                candidate["_funding_checks"].append("confirm: CONFLICT — " + notes[-1])
+                return "CONFLICT", notes[-1]
+
+    # 2. Stage / amount plausibility -------------------------------------------
+    stage = str(candidate.get("last_funding_round", "") or candidate.get("stage", "")).strip().lower()
+    if stage in {"pre-seed", "preseed", "pre_seed"} and total > 5_000_000:
+        verdict = "STAGE_MISMATCH"
+        notes.append(f"labelled '{stage}' but ${total:,.0f} verified — likely mislabelled or later-stage")
+    elif stage == "seed" and total > 12_000_000:
+        verdict = "STAGE_MISMATCH"
+        notes.append(f"labelled 'seed' but ${total:,.0f} verified")
+
+    # 3. Staleness ------------------------------------------------------------
+    d = parse_date(candidate.get("last_funding_date", ""))
+    if d:
+        months = (datetime.now() - d).days / 30
+        if months > STALE_FUNDING_MONTHS:
+            notes.append(f"figure is ~{months:.0f} months old — current total may be higher")
+            if verdict == "OK":
+                verdict = "STALE"
+
+    if verdict != "OK":
+        cur = (candidate.get("_funding_confidence") or "").lower()
+        if verdict in ("CONFLICT", "STAGE_MISMATCH"):
+            # one notch down; STAGE_MISMATCH on a real figure should not read as a clean seed number
+            candidate["_funding_confidence"] = {"high": "medium", "medium": "low"}.get(cur, cur or "low")
+        for n in notes:
+            candidate["_funding_checks"].append(f"confirm: {verdict} — {n}")
+
+    return verdict, "; ".join(notes) or "consistent"
 
 
 # ---------- Second Layer thesis filter ----------

@@ -133,6 +133,14 @@ All $0-funding candidates pass a **multi-source funding verification step** befo
 
 Every candidate carries a `_funding_checks` audit trail. A verified figure ships with its source URL; an unverified one ships with exactly what was tried (`unverified (checked crunchbase: no key; sec form d: no filing; claude: no source)`) so the analyst knows what to check by hand.
 
+**Then a confirmation pass** (`confirm_funding_report`, STEP 1c) cross-checks each verified figure:
+
+- **Cross-source agreement** — if two passes produced figures that disagree by >1.5× and >$1M: trust the SEC filing if there is one (and flag), otherwise clear the figure back to unverified
+- **Stage/amount plausibility** — "pre-seed" + >$5M or "seed" + >$12M → `STAGE_MISMATCH`, confidence downgraded so it doesn't read as a clean seed number
+- **Staleness** — figure's round date older than 15 months → `STALE` advisory (a newer round may have raised the real total)
+
+Flags show in the digest (`[!] labelled 'seed' but $14M verified; figure is ~19 months old`). Only *then* does the post-enrichment size re-check (`verify_size_post_enrichment`) apply the $10M hard cap.
+
 ### Proprietary Scrape Layer
 
 The sources above are press-and-announcement based — every fund scraping YC and TechCrunch sees the same companies. Each vertical with a `scrape_targets` list also gets a scrape pass that surfaces companies *before* they appear in venture press, by diffing specialist-fund portfolios / accelerator cohorts / program awardee lists run over run.
@@ -163,7 +171,7 @@ The sources above are press-and-announcement based — every fund scraping YC an
 
 1. Fetch each `scrape_target` — static `requests` GET first, then a **headless Chromium render (Playwright)** when the static result is a JS shell.
 2. Claude extracts operating-company names from each page (skips nav, fund names, report titles; text-only, no inference; the vertical's name + keywords steer it).
-3. `passes_scrape_filter()` drops rejects by keyword; block/parked pages are skipped before spending a Claude call.
+3. `passes_scrape_filter()` drops rejects by keyword — a common set (exits, public companies, law firms, SPVs) plus per-vertical lists (software verticals reject hardware/manufacturing; V5 rejects drug-pipeline companies; V20 rejects B2B software). Block/parked pages are skipped before spending a Claude call.
 4. Diff against the **`Scrape Seen`** sheet tab — only names *not seen in a prior run* enter the pipeline. Every surfaced name is recorded immediately, so a company that later fails the gates isn't re-extracted. First run per vertical is capped at `SCRAPE_MAX_NEW` (default 50).
 
 Survivors flow through the normal gates → funding verification → Second Layer filter → 9-factor scoring. Disable the layer with `SCRAPE_LAYER=0`, the headless fallback with `SCRAPE_HEADLESS=0` (legacy `V21_SCRAPE*` names still work).

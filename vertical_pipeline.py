@@ -47,7 +47,7 @@ import feedparser
 from pipeline_utils import (
     get_sheet_client, get_anthropic_client, SHEET_ID, MODEL,
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
-    verify_size_post_enrichment,
+    verify_size_post_enrichment, confirm_funding_report,
     decision_from_score, write_scored_candidates, read_existing_names,
     send_email_digest, MIN_SCORE_PCT, safe_float, ensure_tab,
     record_llm_error, llm_error_count, llm_error_summary,
@@ -1100,12 +1100,16 @@ def _funding_line(cand: dict) -> str:
     val = safe_float(cand.get("total_funding_usd", 0))
     conf = (cand.get("_funding_confidence") or "").lower()
     src = str(cand.get("_funding_source") or "").strip()
+    # Surface any confirm-step flag (CONFLICT / STAGE_MISMATCH / STALE).
+    flags = [c.split("—", 1)[-1].strip() for c in (cand.get("_funding_checks") or [])
+             if str(c).startswith("confirm:")]
+    warn = f"  [!] {'; '.join(flags)}" if flags else ""
     if cand.get("_funding_unverified") or conf in ("", "low", "unverified") or val == 0:
         src = src[len("tried — "):] if src.startswith("tried — ") else src
-        return f"unverified (checked {src})" if src else "unverified"
+        return (f"unverified (checked {src})" if src else "unverified") + warn
     date = cand.get("last_funding_date") or ""
     tag = " (single source)" if conf == "medium" else ""
-    return f"${val:,.0f}{(' as of ' + date) if date else ''}{tag} — {src}"
+    return f"${val:,.0f}{(' as of ' + date) if date else ''}{tag} — {src}" + warn
 
 
 def build_outreach_digest(scored: list) -> str:
@@ -1199,6 +1203,20 @@ def main():
     print("\nSTEP 1b: Verifying zero-funding candidates")
     print("-" * 60)
     verify_zero_funding(ai_client, candidates)
+
+    # Step 1c: Confirm funding figures are internally consistent (cross-source
+    # agreement, stage/amount plausibility, staleness). Downgrades or clears
+    # figures that don't hold up — no bad number should reach the sheet clean.
+    print("\nSTEP 1c: Confirming funding reports")
+    print("-" * 60)
+    _fc = {}
+    for c in candidates:
+        verdict, note = confirm_funding_report(c)
+        if verdict != "OK":
+            _fc[verdict] = _fc.get(verdict, 0) + 1
+            print(f"  {verdict}: {c.get('name', '?')} — {note}")
+    print(f"Confirmed: {len(candidates) - sum(_fc.values())} clean, " +
+          (", ".join(f"{n}×{v}" for v, n in _fc.items()) if _fc else "0 flagged"))
 
     # Step 2: Dedup
     existing = read_existing_names(sheet_client, target_tab)

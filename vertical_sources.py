@@ -8,8 +8,32 @@ Second Layer vertical schema. Changes from prior version:
   - V16–V19: NET NEW Second Layer verticals
 
 Each vertical: keywords (YC/SEC/TechCrunch filtering), rss_feeds (sector
-publications), search_terms (Claude research queries).
+publications), search_terms (Claude research queries), scrape_targets
+(specialist portfolios/cohorts), optional scrape_filters (reject_keywords).
 """
+
+# ---- Scrape pre-filter reject lists --------------------------------------------
+# Applied to every vertical's scrape results — the entry isn't a sourceable
+# early-stage startup (an exit, a public company, or not a company at all).
+_COMMON_SCRAPE_REJECTS = [
+    "acquired by", "acquisition by", "was acquired", "ipo'd", "went public",
+    "publicly traded", "(nasdaq:", "(nyse:", "shut down", "ceased operations",
+    "wound down", "law firm", "consulting firm", "trade association",
+    "portfolio company of", "our fund", "spv",
+]
+# Reusable per-group lists, attached to specific verticals below.
+SCRAPE_REJECTS_HARDWARE = [
+    "hardware company", "manufactures", "manufacturing plant", "chip fab",
+    "device manufacturer", "builds devices", "materials science", "fabrication",
+]
+SCRAPE_REJECTS_THERAPEUTICS = [
+    "drug discovery", "therapeutics", "clinical-stage", "preclinical",
+    "drug candidate", "novel molecule", "gene therapy pipeline",
+]
+SCRAPE_REJECTS_B2B = [
+    "b2b saas", "enterprise software", "developer tool", "devtool",
+    "api platform", "infrastructure software", "data pipeline", "mlops",
+]
 
 VERTICALS = [
     {
@@ -511,6 +535,22 @@ VERTICALS = [
     },
 ]
 
+# Attach per-vertical scrape reject lists (kept out of the literal above so the
+# group constants can be shared). get_scrape_filters() also adds the common set.
+_VERTICAL_SCRAPE_REJECTS = {
+    2: SCRAPE_REJECTS_HARDWARE,      # Fintech — software only
+    6: SCRAPE_REJECTS_HARDWARE,      # Supply Chain — software only
+    8: SCRAPE_REJECTS_HARDWARE,      # Cybersecurity — software only
+    13: SCRAPE_REJECTS_HARDWARE,     # AI Agents — software only
+    5: SCRAPE_REJECTS_THERAPEUTICS,  # Biotech/Medtech — tooling/compliance, not drug pipelines
+    20: SCRAPE_REJECTS_B2B,          # Consumer brands — not B2B software
+}
+for _v in VERTICALS:
+    _extra = _VERTICAL_SCRAPE_REJECTS.get(_v["id"])
+    if _extra:
+        _sf = _v.setdefault("scrape_filters", {})
+        _sf["reject_keywords"] = list(_sf.get("reject_keywords", [])) + _extra
+
 
 def get_vertical(vertical_id: int) -> dict:
     """Get a vertical by ID."""
@@ -526,46 +566,26 @@ def get_scrape_targets(vertical: dict) -> list:
     These are NOT RSS feeds — they are pages that must be scraped for newly-listed
     company names. Keep them separate from rss_feeds so a standard feed parser
     never chokes on HTML.
-
-    Only V21 defines these today; every other vertical safely returns [].
     """
     return vertical.get("scrape_targets", []) or []
 
 
 def get_scrape_filters(vertical: dict) -> dict:
-    """
-    Return the filter rules to apply to companies found via scrape_targets.
-
-    Scrape channels (accelerator cohorts, program awardee lists) have deliberately
-    LOW precision — e.g. Third Derivative's 2026 cohort was ~90% hardware. These
-    filters are what convert a noisy channel into a useful one.
-
-    Returns sane defaults if the vertical defines no filters.
-    """
-    return vertical.get("scrape_filters", {
-        "require_us": True,
-        "require_software": True,
-        "reject_keywords": [],
-        "max_total_funding": 10_000_000,
-    })
+    """Filter rules applied to companies found via scrape_targets, BEFORE the
+    expensive enrichment/scoring steps. A vertical may set "scrape_filters"
+    with a "reject_keywords" list; the common rejects are always added."""
+    f = dict(vertical.get("scrape_filters") or {})
+    f["reject_keywords"] = list(f.get("reject_keywords", [])) + _COMMON_SCRAPE_REJECTS
+    return f
 
 
 def passes_scrape_filter(company_text: str, vertical: dict) -> tuple:
-    """
-    Quick pre-filter for companies found via scrape_targets.
-
-    Runs BEFORE the expensive enrichment/scoring steps so obvious hardware
-    companies from accelerator cohorts get dropped cheaply.
-
-    Returns (passed: bool, reason: str).
-    """
-    filters = get_scrape_filters(vertical)
+    """Quick pre-filter for a scraped company (name + one-line blurb).
+    Returns (passed: bool, reason: str)."""
     text = (company_text or "").lower()
-
-    for kw in filters.get("reject_keywords", []):
+    for kw in get_scrape_filters(vertical).get("reject_keywords", []):
         if kw.lower() in text:
-            return False, f"rejected: matched hardware/non-software keyword '{kw}'"
-
+            return False, f"rejected: matched '{kw}'"
     return True, "passed scrape pre-filter"
 
 
