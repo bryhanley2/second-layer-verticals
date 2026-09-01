@@ -12,8 +12,10 @@ Import this from other pipeline files:
 """
 
 import os
+import sys
 import json
 from datetime import datetime, timezone
+import anthropic
 from anthropic import Anthropic
 import gspread
 from google.oauth2.service_account import Credentials
@@ -21,6 +23,11 @@ from google.oauth2.service_account import Credentials
 # ---------- Constants ----------
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "102k3pj7JjEhSXWgyBS144mgHd93MZywoWVyjWIonX50")
 MIN_SCORE_PCT = 65
+
+# Anthropic model for every sourcing / scoring / verification call in the pipeline.
+# One place to change it. Override with the PIPELINE_MODEL env var (e.g. to pin a
+# snapshot or trial a newer model) without a code edit.
+MODEL = os.environ.get("PIPELINE_MODEL", "claude-opus-4-7")
 
 ALLOWED_STAGES = {
     "pre-seed", "preseed", "pre_seed", "seed",
@@ -63,6 +70,53 @@ def get_sheet_client():
 
 def get_anthropic_client():
     return Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+
+# ---------- LLM call health ----------
+# Every Claude call in the pipeline is wrapped in try/except so one malformed
+# response can't kill a whole run. The danger is the inverse failure: a systemic
+# problem (bad key, wrong model id, sustained rate-limiting) gets swallowed and
+# the run still "succeeds" while writing default/garbage scores. These helpers
+# make that loud instead.
+_LLM_ERRORS: list = []
+
+# Errors that mean the whole run is misconfigured — no point scoring hundreds of
+# companies against an endpoint that will reject every call.
+_FATAL_LLM_ERRORS = (
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+    anthropic.NotFoundError,
+)
+
+
+def record_llm_error(context: str, exc: Exception) -> None:
+    """Log an LLM call failure to stderr and remember it for the end-of-run summary.
+
+    Raises RuntimeError on fatal misconfiguration (bad credentials / unknown
+    model) so the run stops instead of producing a sheet full of defaults.
+    """
+    msg = f"[LLM ERROR] {context}: {type(exc).__name__}: {exc}"
+    print(msg, file=sys.stderr)
+    _LLM_ERRORS.append(msg)
+    if isinstance(exc, _FATAL_LLM_ERRORS):
+        raise RuntimeError(
+            f"Fatal LLM configuration error ({type(exc).__name__}). "
+            f"Check ANTHROPIC_API_KEY and PIPELINE_MODEL (currently '{MODEL}')."
+        ) from exc
+
+
+def llm_error_count() -> int:
+    return len(_LLM_ERRORS)
+
+
+def llm_error_summary() -> str:
+    if not _LLM_ERRORS:
+        return "No LLM call errors this run."
+    lines = [f"{len(_LLM_ERRORS)} LLM call error(s) this run:"]
+    lines.extend(f"  - {m}" for m in _LLM_ERRORS[:20])
+    if len(_LLM_ERRORS) > 20:
+        lines.append(f"  ... and {len(_LLM_ERRORS) - 20} more")
+    return "\n".join(lines)
 
 
 # ---------- Type coercion helpers ----------
@@ -239,7 +293,7 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
 
     try:
         response = ai_client.messages.create(
-            model="claude-opus-4-7",
+            model=MODEL,
             max_tokens=100,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -249,8 +303,10 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
         reason = parts[1].strip() if len(parts) > 1 else ""
         return score, reason
     except Exception as e:
-        print(f"    Second Layer eval error for {candidate.get('name')}: {e}")
-        return 2, "eval error, defaulted to borderline"
+        record_llm_error(f"Second Layer eval for {candidate.get('name')}", e)
+        # Fail CLOSED: callers treat score >= 2 as "passes the thesis filter", so a
+        # failed eval must score 0/1, never the old default of 2 that let it through.
+        return 0, "Second Layer eval failed (LLM error) — excluded"
 
 
 # ---------- 9-factor scoring ----------
@@ -294,7 +350,7 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
 
     try:
         response = ai_client.messages.create(
-            model="claude-opus-4-7",
+            model=MODEL,
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -338,8 +394,10 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
             "founders": meta["founders"],
         }
     except Exception as e:
-        print(f"    Scoring error for {candidate.get('name')}: {e}")
-        return {"scores": {}, "weighted_pct": 0, "summary": "", "strengths": "", "risks": f"Error: {e}", "founders": ""}
+        record_llm_error(f"9-factor scoring for {candidate.get('name')}", e)
+        # weighted_pct 0 drops the candidate at the threshold check — fail closed.
+        return {"scores": {}, "weighted_pct": 0, "summary": "", "strengths": "",
+                "risks": f"scoring failed (LLM error): {e}", "founders": ""}
 
 
 def decision_from_score(pct: float) -> str:

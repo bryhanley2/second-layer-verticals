@@ -28,6 +28,8 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           VERTICAL_INDEX: ${{ github.event.inputs.vertical_index }}
+          # Optional: set repo variable PIPELINE_MODEL to pin/trial a model. Blank -> code default.
+          PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}

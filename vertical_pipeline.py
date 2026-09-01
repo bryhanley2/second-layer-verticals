@@ -30,11 +30,12 @@ from datetime import datetime, timezone
 import requests
 import feedparser
 from pipeline_utils import (
-    get_sheet_client, get_anthropic_client, SHEET_ID,
+    get_sheet_client, get_anthropic_client, SHEET_ID, MODEL,
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
     verify_size_post_enrichment,
     decision_from_score, write_scored_candidates, read_existing_names,
     send_email_digest, MIN_SCORE_PCT, safe_float,
+    record_llm_error, llm_error_count, llm_error_summary,
 )
 from vertical_sources import get_vertical, get_vertical_by_day_of_year
 
@@ -328,7 +329,7 @@ Do NOT include placeholder or made-up companies. If uncertain about whether a co
 is real, skip it entirely. Return ONLY JSON lines, nothing else."""
         try:
             response = ai_client.messages.create(
-                model="claude-opus-4-7",
+                model=MODEL,
                 max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -353,7 +354,7 @@ is real, skip it entirely. Return ONLY JSON lines, nothing else."""
                 except json.JSONDecodeError:
                     continue
         except Exception as e:
-            print(f"[Claude V-Research '{term}'] Error: {e}")
+            record_llm_error(f"vertical research query '{term}'", e)
     print(f"[Claude Vertical Research] {len(candidates)} candidates")
     return candidates
 
@@ -472,7 +473,7 @@ Companies: {json.dumps(names)}
 Return ONLY a JSON object mapping company name to the fields above. No preamble."""
     try:
         resp = ai_client.messages.create(
-            model="claude-opus-4-7", max_tokens=2000,
+            model=MODEL, max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
         verified = json.loads(resp.content[0].text.strip())
@@ -516,7 +517,8 @@ Return ONLY a JSON object mapping company name to the fields above. No preamble.
             c["_funding_source"] = info.get("source_citation") or "Claude verified"
         print(f"[Funding verify] Claude: {updated} verified, {unverified_count} flagged as unverified")
     except Exception as e:
-        print(f"[Funding verify] Claude error: {e} — proceeding with original data")
+        record_llm_error("funding verification pass", e)
+        print("[Funding verify] proceeding with pre-verification data for this batch")
 
 
 # ============================================================================
@@ -586,7 +588,7 @@ Description: {str(candidate.get("description", ""))[:500]}
 Return ONLY: SCORE: N | REASON: one short sentence"""
     try:
         resp = ai_client.messages.create(
-            model="claude-opus-4-7", max_tokens=200,
+            model=MODEL, max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.content[0].text.strip()
@@ -603,8 +605,9 @@ Return ONLY: SCORE: N | REASON: one short sentence"""
                 reason = line.split(":", 1)[1].strip()
         return max(1, min(3, score)), reason or "consumer eval no reason"
     except Exception as e:
-        print(f"    Consumer Second Layer eval error for {candidate.get('name')}: {e}")
-        return 2, "consumer eval error, defaulted to borderline"
+        record_llm_error(f"consumer Second Layer eval for {candidate.get('name')}", e)
+        # Fail CLOSED — score < 2 excludes the candidate downstream.
+        return 1, "consumer Second Layer eval failed (LLM error) — excluded"
 
 
 def main():
@@ -750,6 +753,20 @@ def main():
     print(f"\n{'='*60}")
     print(f"Vertical pipeline V{idx} complete.")
     print(f"{'='*60}\n")
+
+    # Surface any swallowed LLM failures loudly. A run that "completes" while a
+    # chunk of its scoring/eval calls errored is not a healthy run — say so, and
+    # exit non-zero if the failures were widespread so the workflow shows red.
+    errors = llm_error_count()
+    if errors:
+        print("!" * 60, file=sys.stderr)
+        print(llm_error_summary(), file=sys.stderr)
+        print("!" * 60, file=sys.stderr)
+        if scored is not None and errors >= max(5, len(scored)):
+            raise RuntimeError(
+                f"{errors} LLM call errors this run vs only {len(scored)} scored "
+                f"candidates — treating the run as failed. Check API key / model / rate limits."
+            )
 
 
 if __name__ == "__main__":

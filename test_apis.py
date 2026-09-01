@@ -4,16 +4,23 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 
+# Test against the exact model the pipeline uses. Falls back to a literal if
+# pipeline_utils can't be imported so the diagnostic still runs standalone.
+try:
+    from pipeline_utils import MODEL
+except Exception:
+    MODEL = os.environ.get("PIPELINE_MODEL", "claude-opus-4-7")
+
 print("="*60)
 print("API CREDENTIAL TEST")
 print("="*60)
 
 # Test 1: Anthropic
-print("\n[1] Testing Anthropic API...")
+print(f"\n[1] Testing Anthropic API (model={MODEL})...")
 try:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     resp = client.messages.create(
-        model="claude-opus-4-5",
+        model=MODEL,
         max_tokens=20,
         messages=[{"role": "user", "content": "Say 'API works'"}]
     )
