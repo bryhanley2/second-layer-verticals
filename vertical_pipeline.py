@@ -9,6 +9,8 @@ Runs on-demand for a specific vertical (0-20). Combines free sources:
   5. Claude Research — vertical-targeted research prompts
   6. Extra sources   — YC Launch HN posts, Product Hunt, VC newsletters
                        (new_sources.py; set EXTRA_SOURCES=0 to skip)
+  7. V21 scrape      — V21 only: HTML scrape_targets + run-over-run diff
+                       (set V21_SCRAPE=0 to skip)
 
 All candidates pass through the three hard gates before scoring, then the
 Second Layer thesis filter, then 9-factor scoring. Writes to the
@@ -36,10 +38,13 @@ from pipeline_utils import (
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
     verify_size_post_enrichment,
     decision_from_score, write_scored_candidates, read_existing_names,
-    send_email_digest, MIN_SCORE_PCT, safe_float,
+    send_email_digest, MIN_SCORE_PCT, safe_float, ensure_tab,
     record_llm_error, llm_error_count, llm_error_summary,
 )
-from vertical_sources import get_vertical, get_vertical_by_day_of_year
+from vertical_sources import (
+    get_vertical, get_vertical_by_day_of_year,
+    get_scrape_targets, passes_scrape_filter,
+)
 from new_sources import source_yc_launches, source_producthunt, VC_NEWSLETTER_FEEDS
 
 VERTICAL_TAB = "Vertical Pipeline"
@@ -47,6 +52,18 @@ VERTICAL_TAB = "Vertical Pipeline"
 # Extra early-signal sources (YC Launches, Product Hunt, VC newsletters) run in
 # STEP 1 unless EXTRA_SOURCES=0.
 EXTRA_SOURCES_ENABLED = os.environ.get("EXTRA_SOURCES", "1").strip() != "0"
+
+# V21 proprietary scrape layer (HTML targets + run-over-run diff). Only V21
+# defines scrape_targets, so this is a no-op for every other vertical. Set
+# V21_SCRAPE=0 to skip it even for V21.
+V21_SCRAPE_ENABLED = os.environ.get("V21_SCRAPE", "1").strip() != "0"
+SCRAPE_STATE_TAB = "V21 Scrape Seen"
+# Cap on how many never-before-seen companies one scrape run pushes into the
+# pipeline — protects the first run (empty state) from processing whole portfolios.
+try:
+    SCRAPE_MAX_NEW = int(os.environ.get("V21_SCRAPE_MAX_NEW") or "50")
+except ValueError:
+    SCRAPE_MAX_NEW = 50
 
 # Recent YC batches considered "early enough" for the stage gate.
 # Adjust as new batches are announced.
@@ -423,6 +440,186 @@ def source_extra(vertical: dict) -> list:
 
 
 # ============================================================================
+# Source 7: V21 proprietary scrape layer
+# ============================================================================
+# The five/six sources above are press-and-announcement based — every fund
+# scraping YC and TechCrunch sees the same companies. The V21 scrape_targets
+# (DOE program ecosystems, specialist-fund portfolios, accelerator cohorts,
+# RTO/ISO registries) surface companies BEFORE they hit venture press.
+#
+# Flow: fetch each target's HTML -> reduce to visible text + link list ->
+# Claude extracts company names -> passes_scrape_filter() drops hardware ->
+# diff against the "V21 Scrape Seen" tab so only NEW names enter the pipeline.
+#
+# LIMITATION: this is a static fetch (requests). Fully JS-rendered portfolio
+# SPAs return an empty shell and yield nothing until a headless fetch is added;
+# such targets are logged as "likely JS-rendered".
+
+_SCRAPE_UA = "Mozilla/5.0 (compatible; SecondLayerVC-research/1.0; +https://bryanhanleyvc.substack.com)"
+# Drop non-content blocks (incl. their contents) before extracting text.
+# Deliberately conservative — stripping <nav>/<header>/<footer> ate real content
+# on sites that nest their listings inside those tags. The extraction prompt is
+# told to skip nav/generic text instead.
+_TAG_RE = re.compile(r"(?is)<(script|style|noscript|svg|template)\b.*?</\1>")
+_ANCHOR_RE = re.compile(r'(?is)<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>')
+_STRIP_RE = re.compile(r"(?s)<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def _fetch_page_text(url: str, timeout: int = 20) -> str:
+    """Fetch a page and reduce it to visible text plus an anchor-text/href list
+    (portfolio pages are mostly links). Returns "" on any fetch error."""
+    try:
+        resp = requests.get(url, headers={"User-Agent": _SCRAPE_UA}, timeout=timeout)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"  [scrape] fetch failed: {url} — {e}")
+        return ""
+    html = _TAG_RE.sub(" ", resp.text)
+
+    link_lines = []
+    for href, inner in _ANCHOR_RE.findall(html):
+        t = _WS_RE.sub(" ", _STRIP_RE.sub(" ", inner)).strip()
+        if 2 <= len(t) <= 60 and not href.startswith(("#", "mailto:", "javascript:")):
+            link_lines.append(f"{t} -> {href}")
+
+    body = _WS_RE.sub(" ", _STRIP_RE.sub(" ", html)).strip()
+    combined = body[:5000]
+    if link_lines:
+        combined += "\n\nLINKS ON PAGE:\n" + "\n".join(link_lines[:150])
+    return combined[:9000]
+
+
+def _looks_js_rendered(page_text: str) -> bool:
+    """Static fetch of a JS SPA yields an almost-empty shell."""
+    return len(page_text.strip()) < 250
+
+
+def _extract_companies_from_page(ai_client, url: str, page_text: str, vertical: dict) -> list:
+    """Ask Claude to pull operating-company names out of one scraped page.
+    Returns list of {name, website, note}. [] on error or empty page."""
+    if len(page_text.strip()) < 250:
+        return []
+    prompt = f"""Text scraped from: {url}
+
+This page is expected to list startups / companies — a VC portfolio, an
+accelerator cohort, a government program's awardee or teaming list, or a
+market-participant registry.
+
+Extract every entry that is an operating company/startup in or adjacent to:
+"{vertical['name']}" — asset-light SOFTWARE for the energy, grid, and
+data-center-power buildout.
+
+STRICT RULES:
+- Real company names only. Skip nav items, section headers, people's names,
+  fund/investor names, report titles, and generic phrases ("Our Portfolio",
+  "Learn more", "Read the case study").
+- Use ONLY names present in the text below. Do not infer or invent companies.
+- If the page lists no companies, return nothing at all.
+
+Return ONE JSON object per line and nothing else:
+{{"name": "...", "website": "https://... or empty", "note": "<=12 words on what they do, or empty"}}
+
+--- PAGE TEXT ---
+{page_text}"""
+    try:
+        resp = ai_client.messages.create(
+            model=MODEL, max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text.strip()
+    except Exception as e:
+        record_llm_error(f"V21 scrape extraction {url}", e)
+        return []
+
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            c = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        nm = str(c.get("name", "")).strip()
+        if nm:
+            out.append({
+                "name": nm[:80],
+                "website": str(c.get("website", "") or "").strip()[:300],
+                "note": str(c.get("note", "") or "").strip()[:200],
+            })
+    return out
+
+
+def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
+    """V21 proprietary scrape layer. Returns candidate-shaped dicts for
+    companies found on scrape_targets that were NOT seen in a prior run.
+    No-op (returns []) for any vertical without scrape_targets."""
+    targets = get_scrape_targets(vertical)
+    if not targets:
+        return []
+
+    print(f"[V21 scrape] {len(targets)} targets")
+    seen = read_existing_names(sheet_client, SCRAPE_STATE_TAB)  # lowercased set
+    first_run = not seen
+    if first_run:
+        print("[V21 scrape] no prior state — first run will record targets without flooding "
+              f"the pipeline (cap {SCRAPE_MAX_NEW})")
+
+    new_hits = {}  # name_lower -> (name, website, note, source_url)
+    for url in targets:
+        page_text = _fetch_page_text(url)
+        if not page_text:
+            continue
+        if _looks_js_rendered(page_text):
+            print(f"  [scrape] likely JS-rendered, skipping: {url}")
+            continue
+        for c in _extract_companies_from_page(ai_client, url, page_text, vertical):
+            key = c["name"].lower()
+            if key in seen or key in new_hits:
+                continue
+            ok, reason = passes_scrape_filter(f"{c['name']} {c['note']}", vertical)
+            if not ok:
+                print(f"  [scrape] filtered {c['name']}: {reason}")
+                continue
+            new_hits[key] = (c["name"], c["website"], c["note"], url)
+
+    print(f"[V21 scrape] {len(new_hits)} new companies after dedup + hardware filter")
+
+    selected = list(new_hits.values())[:SCRAPE_MAX_NEW]
+    if len(new_hits) > SCRAPE_MAX_NEW:
+        print(f"[V21 scrape] capping at {SCRAPE_MAX_NEW}; remaining will surface next run")
+
+    # Record every selected name as seen BEFORE gating/scoring, so a company that
+    # fails downstream isn't re-extracted every run. The seen tab is cheap to prune.
+    _record_scrape_seen(sheet_client, [(n, u, note) for (n, _w, note, u) in selected])
+
+    return [
+        _adapt_extra_record(
+            {"name": n, "url": w or u, "description": note, "source": "V21 Scrape"},
+            vertical["name"],
+        )
+        for (n, w, note, u) in selected
+    ]
+
+
+def _record_scrape_seen(sheet_client, rows: list) -> None:
+    """Append (name, source_url, note) rows to the V21 Scrape Seen tab."""
+    if not rows:
+        return
+    try:
+        tab = ensure_tab(
+            sheet_client, SCRAPE_STATE_TAB,
+            headers=["Company", "First Seen", "Source URL", "Note"], cols=4,
+        )
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tab.append_rows([[n, now, u, note] for (n, u, note) in rows])
+        print(f"[V21 scrape] recorded {len(rows)} names to '{SCRAPE_STATE_TAB}'")
+    except Exception as e:
+        print(f"[V21 scrape] could not update '{SCRAPE_STATE_TAB}': {e}")
+
+
+# ============================================================================
 # Funding verification for $0-funding candidates (YC + RSS fallbacks)
 # ============================================================================
 def _crunchbase_lookup(company_name: str) -> dict:
@@ -710,6 +907,10 @@ def main():
         candidates.extend(source_extra(vertical))
     else:
         print("[extra sources] skipped (EXTRA_SOURCES=0)")
+    if V21_SCRAPE_ENABLED:
+        candidates.extend(source_vertical_scrape(ai_client, sheet_client, vertical))
+    elif get_scrape_targets(vertical):
+        print("[V21 scrape] skipped (V21_SCRAPE=0)")
     print(f"\nTotal raw: {len(candidates)}")
 
     # Step 1b: Verify funding for $0 candidates before gating

@@ -133,7 +133,16 @@ V21 uses everything above **plus an 18-target scrape layer** the other 21 vertic
 
 **Proven results from this layer:** Glacian Technologies (university tech-transfer, Penn State) and GridBoost / ContractPower (DOE AI4IX teaming list) — none of which would have surfaced through the standard five-source pipeline.
 
-**Implementation status:** `scrape_targets` and `scrape_filters` are configured in `vertical_sources.py` with a working pre-filter (`passes_scrape_filter()`) that rejects hardware/materials companies by keyword before expensive enrichment runs. A dedicated `source_vertical_scrape()` fetcher (HTML parsing + run-over-run diffing) is **not yet built** — this is the next implementation step, not a live source today.
+**Implementation status:** live. `source_vertical_scrape()` in `vertical_pipeline.py`:
+
+1. Fetches each `scrape_target` (static `requests` GET) and reduces it to visible text + an anchor-text/href list.
+2. Claude extracts operating-company names from each page (skips nav, fund names, report titles; text-only, no inference).
+3. `passes_scrape_filter()` drops hardware/materials companies by keyword.
+4. Diffs the results against the **`V21 Scrape Seen`** sheet tab — only names *not seen in a prior run* enter the pipeline. Every surfaced name is recorded to that tab immediately, so a company that later fails the gates isn't re-extracted each run. First run (empty tab) is capped at `V21_SCRAPE_MAX_NEW` (default 50).
+
+Surviving candidates flow through the normal gates → funding verification → Second Layer filter → 9-factor scoring like any other source. Disable with `V21_SCRAPE=0`.
+
+**Known limitation:** static fetch only. Fully JS-rendered portfolio SPAs return an empty shell and are logged as `likely JS-rendered`; those targets yield nothing until a headless fetch is added. Several targets currently 403/404/525 on a plain GET (Powerhouse, Urban Future Lab, The Clean Fight) and are skipped gracefully.
 
 ### V21 Funding Range (Tighter Than Other Verticals)
 
@@ -271,7 +280,7 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 | Claude Research | ✅ Working | 6–8 high-quality candidates/run |
 | HN Show | ✅ Working | Main pipeline only |
 | GitHub Search | ⚠️ Skipped | Requires GITHUB_TOKEN secret |
-| V21 Scrape Layer | ⚠️ Configured, not live | `scrape_targets`/`scrape_filters` defined in `vertical_sources.py`; fetcher (`source_vertical_scrape()`) not yet implemented |
+| V21 Scrape Layer | ✅ Live (static fetch) | `source_vertical_scrape()` — HTML fetch + Claude extraction + hardware filter + run-over-run diff via the `V21 Scrape Seen` tab. JS-rendered targets need a headless fetch (not yet added). |
 
 **Funding data integrity (Aug 2026 fix):** the Claude Research sourcing step no longer asks the model to produce funding figures directly — it fabricated plausible-but-wrong numbers (e.g. recycling one company's raise onto another). Funding is now sourced only through the verification pass, which requires a citable source or returns null. Companies with unconfirmed funding are flagged `(UNVERIFIED)` in the sheet rather than shown with a bare number.
 
