@@ -449,7 +449,7 @@ def read_existing_names(client, tab_name: str) -> set:
 
 def write_scored_candidates(client, tab_name: str, scored: list, vertical_label: str = ""):
     """Append scored candidates to the specified tab."""
-    tab = ensure_tab(client, tab_name, headers=PIPELINE_HEADERS)
+    tab = ensure_tab(client, tab_name, headers=PIPELINE_HEADERS, cols=len(PIPELINE_HEADERS) + 2)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rows = []
     for c in scored:

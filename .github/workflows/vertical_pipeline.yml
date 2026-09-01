@@ -9,6 +9,12 @@ on:
         description: 'Vertical index (0-21), leave blank for day-of-year rotation'
         required: false
         default: ''
+      industry_query:
+        description: 'On-demand: free-text industry/theme. Overrides vertical_index; writes to the "On-Demand Pipeline" tab.'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [run-industry-pipeline]
 
 jobs:
   run:
@@ -28,6 +34,9 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           VERTICAL_INDEX: ${{ github.event.inputs.vertical_index }}
+          # On-demand industry query: from a manual run's input, or a repository_dispatch
+          # (type: run-industry-pipeline) client_payload.industry_query.
+          INDUSTRY_QUERY: ${{ github.event.inputs.industry_query || github.event.client_payload.industry_query }}
           # Optional: set repo variable PIPELINE_MODEL to pin/trial a model. Blank -> code default.
           PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
           # Optional: set repo variable EXTRA_SOURCES to "0" to skip YC Launches / Product Hunt / VC newsletters.

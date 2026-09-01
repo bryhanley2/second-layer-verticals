@@ -17,10 +17,15 @@ Second Layer thesis filter, then 9-factor scoring. Writes to the
 "Vertical Pipeline" tab with the vertical name annotated.
 
 Usage:
-  VERTICAL_INDEX=0 python vertical_pipeline.py   # Energy
-  VERTICAL_INDEX=10 python vertical_pipeline.py  # Healthcare
-  VERTICAL_INDEX=20 python vertical_pipeline.py  # Consumer Health Brands
+  VERTICAL_INDEX=0 python vertical_pipeline.py       # Energy
+  VERTICAL_INDEX=10 python vertical_pipeline.py      # Healthcare
+  VERTICAL_INDEX=20 python vertical_pipeline.py      # Consumer Health Brands
   (no override) → rotates by day of year
+
+  INDUSTRY_QUERY="precision fermentation" python vertical_pipeline.py
+      → on-demand: Claude synthesizes a vertical (keywords / feeds / search
+        terms) from the free-text query, then runs the full pipeline for it and
+        writes to the "On-Demand Pipeline" tab. Overrides VERTICAL_INDEX.
 
 Required env vars:
   ANTHROPIC_API_KEY, GOOGLE_CREDENTIALS_JSON, GOOGLE_SHEET_ID
@@ -42,12 +47,15 @@ from pipeline_utils import (
     record_llm_error, llm_error_count, llm_error_summary,
 )
 from vertical_sources import (
-    get_vertical, get_vertical_by_day_of_year,
+    get_vertical, get_vertical_by_day_of_year, synthesize_vertical,
     get_scrape_targets, passes_scrape_filter,
 )
 from new_sources import source_yc_launches, source_producthunt, VC_NEWSLETTER_FEEDS
 
 VERTICAL_TAB = "Vertical Pipeline"
+# On-demand runs (INDUSTRY_QUERY set) write here instead, to keep the curated
+# vertical data separate from ad-hoc industry requests.
+ON_DEMAND_TAB = "On-Demand Pipeline"
 
 # Extra early-signal sources (YC Launches, Product Hunt, VC newsletters) run in
 # STEP 1 unless EXTRA_SOURCES=0.
@@ -871,28 +879,41 @@ Return ONLY: SCORE: N | REASON: one short sentence"""
 
 
 def main():
-    override = os.environ.get("VERTICAL_INDEX", "")
-    if override.strip():
+    ai_client = get_anthropic_client()
+    industry_query = os.environ.get("INDUSTRY_QUERY", "").strip()
+    override = os.environ.get("VERTICAL_INDEX", "").strip()
+
+    if industry_query:
+        # On-demand: synthesize a vertical from a free-text industry string.
+        print(f"Synthesizing vertical from industry query: {industry_query!r}")
+        vertical = synthesize_vertical(ai_client, industry_query, MODEL)
+        idx = "custom"
+        target_tab = ON_DEMAND_TAB
+        print(f"  -> {vertical['name']}: {len(vertical['keywords'])} keywords, "
+              f"{len(vertical['rss_feeds'])} valid feeds, {len(vertical['search_terms'])} search terms")
+    elif override:
         try:
             idx = int(override)
         except ValueError:
             raise RuntimeError(f"Invalid VERTICAL_INDEX: {override}")
         vertical = get_vertical(idx)
+        target_tab = VERTICAL_TAB
     else:
         idx, vertical = get_vertical_by_day_of_year()
+        target_tab = VERTICAL_TAB
 
     name = vertical["name"]
     keywords = vertical.get("keywords", [])
     rss_feeds = vertical.get("rss_feeds", [])
     search_terms = vertical.get("search_terms", [])
 
+    label = f"V{idx}" if isinstance(idx, int) else "on-demand"
     print(f"\n{'='*60}")
-    print(f"Vertical Pipeline — V{idx}: {name}")
+    print(f"Vertical Pipeline — {label}: {name}  ->  '{target_tab}' tab")
     print(f"Time: {datetime.now(timezone.utc).isoformat()}")
     print(f"{'='*60}\n")
 
     sheet_client = get_sheet_client()
-    ai_client = get_anthropic_client()
 
     # Step 1: Source collection
     print("STEP 1: Pulling from vertical-specific sources")
@@ -919,7 +940,7 @@ def main():
     verify_zero_funding(ai_client, candidates)
 
     # Step 2: Dedup
-    existing = read_existing_names(sheet_client, VERTICAL_TAB)
+    existing = read_existing_names(sheet_client, target_tab)
     candidates = deduplicate(candidates, existing)
     print(f"After dedup: {len(candidates)}")
 
@@ -1005,21 +1026,24 @@ def main():
     print(f"\nScored above threshold: {len(scored)}")
 
     # Step 6: Write
-    print(f"\nSTEP 5: Writing to '{VERTICAL_TAB}' tab")
+    print(f"\nSTEP 5: Writing to '{target_tab}' tab")
     print("-" * 60)
-    write_scored_candidates(sheet_client, VERTICAL_TAB, scored, vertical_label=name)
+    write_scored_candidates(sheet_client, target_tab, scored, vertical_label=name)
 
     # Step 7: Email
     if scored:
         body_lines = [f"{c['candidate']['name']} — {c['weighted_pct']}% — {c['decision']}"
                       for c in scored[:10]]
-        send_email_digest(
-            subject=f"Vertical Pipeline {name} — {len(scored)} candidates",
-            body=f"Vertical: {name}\n\n" + "\n".join(body_lines),
-        )
+        if industry_query:
+            subject = f"On-Demand Pipeline: {name} — {len(scored)} candidates"
+            body = f"Industry query: {industry_query}\nSynthesized vertical: {name}\n\n"
+        else:
+            subject = f"Vertical Pipeline {name} — {len(scored)} candidates"
+            body = f"Vertical: {name}\n\n"
+        send_email_digest(subject=subject, body=body + "\n".join(body_lines))
 
     print(f"\n{'='*60}")
-    print(f"Vertical pipeline V{idx} complete.")
+    print(f"Pipeline run complete — {label}: {name}")
     print(f"{'='*60}\n")
 
     # Surface any swallowed LLM failures loudly. A run that "completes" while a

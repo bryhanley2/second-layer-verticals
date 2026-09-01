@@ -484,6 +484,99 @@ def get_vertical_by_day_of_year(day: int = None):
     return vertical_id, VERTICALS[vertical_id]
 
 
+# ============================================================================
+# On-demand vertical synthesis
+# ============================================================================
+def _validate_feeds(urls: list, timeout: int = 12) -> list:
+    """Keep only URLs that fetch (HTTP 200) and parse to at least one feed item."""
+    import feedparser
+    import requests
+
+    ok = []
+    for u in urls:
+        try:
+            r = requests.get(
+                u, timeout=timeout,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; SecondLayerVC-research/1.0)"},
+            )
+            if r.status_code == 200 and feedparser.parse(r.content).entries:
+                ok.append(u)
+            else:
+                print(f"  [synth] dropped feed (status {r.status_code} / no entries): {u}")
+        except Exception as e:
+            print(f"  [synth] dropped feed ({e}): {u}")
+    return ok
+
+
+def synthesize_vertical(ai_client, industry: str, model: str) -> dict:
+    """Build a vertical config from a free-text industry string.
+
+    Matches the shape of the VERTICALS entries (minus the V21-only scrape
+    fields). Claude proposes the name, Second Layer framing, keywords, Claude-
+    research search terms, and candidate RSS feeds; proposed feeds are fetched
+    and parsed, and only working ones are kept (Claude is unreliable at feed URLs).
+
+    Raises on an empty query or an unparseable model response — there is no
+    vertical to run without this.
+    """
+    import json
+
+    industry = (industry or "").strip()
+    if not industry:
+        raise ValueError("synthesize_vertical: empty industry string")
+
+    prompt = f"""Build a seed-stage startup sourcing profile for this industry / theme:
+
+"{industry}"
+
+Return ONE JSON object and nothing else:
+{{
+  "name": "clean 3-8 word vertical name",
+  "second_layer_logic": "one sentence — the dominant trend that CREATES the problem the companies in this space solve",
+  "keywords": ["12-18 lowercase terms or short phrases that would appear in a company's description, YC profile, SEC filing text, or a funding headline in this space"],
+  "search_terms": ["4-6 web-search-style queries for recent seed rounds in this space, each ending with a recency cue like 2026"],
+  "rss_feeds": ["0-5 REAL RSS/Atom feed URLs (https://site/feed/ style) for trade press or newsletters covering this industry — only ones you are confident exist; empty list if unsure"]
+}}
+
+Rules:
+- keywords: specific enough to filter noise, broad enough to catch plain-language pitches. No bare generic words ("software", "ai", "platform") on their own.
+- rss_feeds: never invent URLs. Fewer real feeds beats more guesses."""
+
+    resp = ai_client.messages.create(
+        model=model, max_tokens=1200,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = resp.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        text = text[4:].strip() if text.lower().startswith("json") else text.strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"synthesize_vertical: model did not return JSON ({e}): {text[:200]}")
+
+    name = str(data.get("name") or industry).strip()[:80]
+    keywords = [str(k).strip().lower() for k in (data.get("keywords") or []) if str(k).strip()][:20]
+    search_terms = [str(s).strip() for s in (data.get("search_terms") or []) if str(s).strip()][:8]
+    proposed = [str(u).strip() for u in (data.get("rss_feeds") or []) if str(u).strip().lower().startswith("http")]
+
+    if not keywords:
+        raise RuntimeError(f"synthesize_vertical: no usable keywords generated for {industry!r}")
+
+    print(f"  [synth] validating {len(proposed)} proposed feed(s)")
+    valid_feeds = _validate_feeds(proposed)
+
+    return {
+        "id": "custom",
+        "name": name,
+        "second_layer_logic": str(data.get("second_layer_logic") or "").strip()[:300],
+        "keywords": keywords,
+        "rss_feeds": valid_feeds,
+        "search_terms": search_terms,
+        "_synthesized_from": industry,
+    }
+
+
 if __name__ == "__main__":
     print("=" * 80)
     print(f"V0-V{len(VERTICALS)-1} SECOND LAYER VERTICALS")

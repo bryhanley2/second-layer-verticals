@@ -217,6 +217,7 @@ All three must pass or the company is excluded:
 |-----|----------|
 | Pipeline | All candidates scoring above threshold from main pipeline runs |
 | Vertical Pipeline | Candidates organized by vertical (V0–V21) |
+| On-Demand Pipeline | Candidates from free-text `INDUSTRY_QUERY` runs (auto-created) |
 | Vertical Reference | V0–V21 schema reference with Second Layer logic and example companies |
 | Founder Pipeline | Direct founder sourcing and outreach tracking |
 | Pipeline Archive | Historical pipeline runs |
@@ -236,10 +237,32 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 
 | Workflow | File | Schedule | Trigger |
 |----------|------|----------|---------|
-| Vertical Pipeline | `vertical_pipeline.yml` | Daily 10:30 UTC | Cron + manual (index 0–21) |
+| Vertical Pipeline | `vertical_pipeline.yml` | Daily 10:30 UTC | Cron + manual (index 0–21) + `industry_query` + `repository_dispatch` |
 | Test APIs | `test_apis.yml` | Manual | GitHub Actions |
 
 *(The Main Pipeline workflow runs from its own repo.)*
+
+---
+
+## On-Demand Pipeline (any industry)
+
+Instead of one of the 22 predefined verticals, the pipeline can be run against a
+**free-text industry or theme**. Claude synthesizes a vertical config for it —
+name, Second Layer framing, 12–18 keywords, Claude-research search terms, and
+2–5 candidate RSS feeds (each fetched and parsed; hallucinated feeds are dropped).
+The full pipeline then runs for that synthesized vertical and writes to a separate
+**`On-Demand Pipeline`** sheet tab.
+
+**Ways to trigger:**
+
+| How | Command / payload |
+|---|---|
+| Locally | `INDUSTRY_QUERY="precision fermentation" python vertical_pipeline.py` |
+| GitHub UI | Run *Vertical Pipeline* → fill in **industry_query** |
+| API / app | `repository_dispatch` with `event_type: run-industry-pipeline`, `client_payload: { "industry_query": "..." }` |
+
+`INDUSTRY_QUERY` overrides `VERTICAL_INDEX`. The V21 scrape layer is skipped
+(synthesized verticals have no `scrape_targets`); every other source runs.
 
 ---
 
