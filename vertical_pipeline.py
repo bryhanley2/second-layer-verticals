@@ -473,11 +473,14 @@ def source_extra(vertical: dict) -> list:
 # Claude extracts company names -> passes_scrape_filter() drops hardware ->
 # diff against the "V21 Scrape Seen" tab so only NEW names enter the pipeline.
 #
-# LIMITATION: this is a static fetch (requests). Fully JS-rendered portfolio
-# SPAs return an empty shell and yield nothing until a headless fetch is added;
-# such targets are logged as "likely JS-rendered".
+# Fetch is static (requests) first; a page that comes back as a JS shell is
+# re-fetched with headless Chromium (Playwright) when available. Set
+# V21_SCRAPE_HEADLESS=0 to force static-only.
 
 _SCRAPE_UA = "Mozilla/5.0 (compatible; SecondLayerVC-research/1.0; +https://bryanhanleyvc.substack.com)"
+V21_SCRAPE_HEADLESS = os.environ.get("V21_SCRAPE_HEADLESS", "1").strip() != "0"
+_HEADLESS_STATE = None  # None = untried, True = works, False = unavailable
+
 # Drop non-content blocks (incl. their contents) before extracting text.
 # Deliberately conservative — stripping <nav>/<header>/<footer> ate real content
 # on sites that nest their listings inside those tags. The extraction prompt is
@@ -488,23 +491,15 @@ _STRIP_RE = re.compile(r"(?s)<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
 
-def _fetch_page_text(url: str, timeout: int = 20) -> str:
-    """Fetch a page and reduce it to visible text plus an anchor-text/href list
-    (portfolio pages are mostly links). Returns "" on any fetch error."""
-    try:
-        resp = requests.get(url, headers={"User-Agent": _SCRAPE_UA}, timeout=timeout)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"  [scrape] fetch failed: {url} — {e}")
-        return ""
-    html = _TAG_RE.sub(" ", resp.text)
-
+def _html_to_text(html: str) -> str:
+    """Reduce raw HTML to visible text + an anchor-text/href list (portfolio
+    pages are mostly links), capped for an LLM prompt."""
+    html = _TAG_RE.sub(" ", html or "")
     link_lines = []
     for href, inner in _ANCHOR_RE.findall(html):
         t = _WS_RE.sub(" ", _STRIP_RE.sub(" ", inner)).strip()
         if 2 <= len(t) <= 60 and not href.startswith(("#", "mailto:", "javascript:")):
             link_lines.append(f"{t} -> {href}")
-
     body = _WS_RE.sub(" ", _STRIP_RE.sub(" ", html)).strip()
     combined = body[:5000]
     if link_lines:
@@ -512,8 +507,75 @@ def _fetch_page_text(url: str, timeout: int = 20) -> str:
     return combined[:9000]
 
 
+def _static_fetch(url: str, timeout: int) -> str:
+    try:
+        resp = requests.get(url, headers={"User-Agent": _SCRAPE_UA}, timeout=timeout)
+        resp.raise_for_status()
+        return resp.text
+    except Exception as e:
+        print(f"  [scrape] static fetch failed: {url} — {e}")
+        return ""
+
+
+def _render_fetch(url: str, nav_timeout_ms: int = 25000) -> str:
+    """Render a JS page with headless Chromium (Playwright). Returns raw HTML,
+    or '' if Playwright isn't installed or rendering fails. Scrolls to trigger
+    lazy-loaded portfolio grids."""
+    global _HEADLESS_STATE
+    if _HEADLESS_STATE is False:
+        return ""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        _HEADLESS_STATE = False
+        print("  [scrape] playwright not installed — headless fetch disabled for this run")
+        return ""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            page = browser.new_page(user_agent=_SCRAPE_UA)
+            page.set_default_timeout(nav_timeout_ms)
+            page.goto(url, wait_until="load")
+            for _ in range(4):  # nudge lazy-loaded grids
+                page.mouse.wheel(0, 4000)
+                page.wait_for_timeout(700)
+            page.wait_for_timeout(1200)
+            html = page.content()
+            browser.close()
+        _HEADLESS_STATE = True
+        return html
+    except Exception as e:
+        print(f"  [scrape] headless render failed: {url} — {e}")
+        return ""
+
+
+def _fetch_page_text(url: str, timeout: int = 20) -> str:
+    """Static fetch first; fall back to headless render when the static result
+    is a JS shell (and Playwright is available)."""
+    raw = _static_fetch(url, timeout)
+    text = _html_to_text(raw) if raw else ""
+    if text and not _looks_js_rendered(text):
+        return text
+    if V21_SCRAPE_HEADLESS:
+        rendered = _render_fetch(url)
+        if rendered:
+            rendered_text = _html_to_text(rendered)
+            if len(rendered_text.strip()) > len(text.strip()):
+                print(f"  [scrape] headless render used: {url} ({len(rendered_text)} chars)")
+                return rendered_text
+    return text
+
+
+_BLOCK_PAGE_RE = re.compile(
+    r"(you have been blocked|access denied|ssl handshake failed|attention required|"
+    r"enable javascript and cookies|checking your browser|request could not be satisfied|"
+    r"this domain (is|may be) for sale|domain for sale)",
+    re.I,
+)
+
+
 def _looks_js_rendered(page_text: str) -> bool:
-    """Static fetch of a JS SPA yields an almost-empty shell."""
+    """A JS SPA that hasn't hydrated yields an almost-empty shell."""
     return len(page_text.strip()) < 250
 
 
@@ -591,10 +653,8 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
     new_hits = {}  # name_lower -> (name, website, note, source_url)
     for url in targets:
         page_text = _fetch_page_text(url)
-        if not page_text:
-            continue
-        if _looks_js_rendered(page_text):
-            print(f"  [scrape] likely JS-rendered, skipping: {url}")
+        if not page_text or _looks_js_rendered(page_text) or _BLOCK_PAGE_RE.search(page_text[:600]):
+            print(f"  [scrape] no usable content (JS shell / blocked / down), skipping: {url}")
             continue
         for c in _extract_companies_from_page(ai_client, url, page_text, vertical):
             key = c["name"].lower()

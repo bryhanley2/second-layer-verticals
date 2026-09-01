@@ -3,3 +3,4 @@ requests
 gspread
 google-auth
 feedparser
+playwright  # V21 scrape layer: headless fallback for JS-rendered pages. Run `playwright install chromium` after pip install. Optional at runtime — the pipeline degrades to static fetch if unavailable.

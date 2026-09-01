@@ -336,8 +336,8 @@ VERTICALS = [
             # month over month; NEW additions are checks written before press coverage.
             "https://www.powerhouse.fund/portfolio",
             "https://www.stepchange.vc/portfolio",
-            "https://www.convective.vc/portfolio",
-            "https://www.mcjcollective.com/portfolio",
+            "https://mcj.vc/portfolio",
+            # convective.vc removed Sep 2026 — domain is parked.
 
             # --- Regional / state program cohorts (NY-local, relationship-buildable) ---
             "https://www.nyserda.ny.gov/All-Programs/Innovation-Programs",

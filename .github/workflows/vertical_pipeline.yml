@@ -27,7 +27,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install anthropic requests gspread google-auth feedparser
+          pip install anthropic requests gspread google-auth feedparser playwright
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
+      - name: Install Chromium (V21 scrape layer — headless fallback)
+        run: python -m playwright install --with-deps chromium
       - name: Run vertical pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -46,6 +53,8 @@ jobs:
           # Optional: V21_SCRAPE="0" skips the V21 scrape layer; V21_SCRAPE_MAX_NEW caps new companies per run.
           V21_SCRAPE: ${{ vars.V21_SCRAPE }}
           V21_SCRAPE_MAX_NEW: ${{ vars.V21_SCRAPE_MAX_NEW }}
+          # Optional: V21_SCRAPE_HEADLESS="0" forces static-only fetch (no Chromium fallback).
+          V21_SCRAPE_HEADLESS: ${{ vars.V21_SCRAPE_HEADLESS }}
           # Optional: ENRICH_CONTACTS="0" skips the website email lookup; DIGEST_TOP_N sets how many go in the email.
           ENRICH_CONTACTS: ${{ vars.ENRICH_CONTACTS }}
           DIGEST_TOP_N: ${{ vars.DIGEST_TOP_N }}
