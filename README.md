@@ -266,6 +266,23 @@ The full pipeline then runs for that synthesized vertical and writes to a separa
 
 ---
 
+## Outreach Digest
+
+After scoring, the top `DIGEST_TOP_N` (default 10) candidates get a
+**website-only** contact lookup (`contact_enrich.py`): fetch the company site's
+home / contact / about / team pages and pull the best public email
+(`founders@` > `team@` > `hello@` > `info@` …, on-domain preferred) plus a
+company/founder LinkedIn URL if one is linked. **No LinkedIn scraping, no paid
+APIs, no email-guessing.** Email hit rate is realistically ~40–60% — many
+startups only expose a form, in which case the digest says so.
+
+The digest (name, score, decision, summary, founders, Second Layer logic,
+strengths/risks, website, email, LinkedIn) is emailed to `EMAIL_RECIPIENT`.
+Enriched website/LinkedIn values are also written back to the sheet row.
+Set `ENRICH_CONTACTS=0` to skip the lookup.
+
+---
+
 ## File Structure
 
 ```
@@ -273,6 +290,7 @@ The full pipeline then runs for that synthesized vertical and writes to a separa
 ├── vertical_pipeline.py    # Vertical pipeline runner (sources 1–7 per vertical)
 ├── vertical_sources.py     # V0–V21 vertical schema (keywords, RSS feeds, search terms, V21 scrape targets)
 ├── new_sources.py          # YC Launch HN + Product Hunt sources, VC newsletter feed list
+├── contact_enrich.py       # Website-only outreach lookup (public email + LinkedIn) for the digest
 ├── pipeline_utils.py       # Model constant, gates, scoring, funding verification, sheet I/O, LLM-error tracking
 ├── test_apis.py            # API credential diagnostic
 ├── sheets_logger_py        # Legacy alternate sheet writer — not wired in

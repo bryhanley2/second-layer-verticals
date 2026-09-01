@@ -12,6 +12,10 @@ Runs on-demand for a specific vertical (0-20). Combines free sources:
   7. V21 scrape      — V21 only: HTML scrape_targets + run-over-run diff
                        (set V21_SCRAPE=0 to skip)
 
+After scoring, the top DIGEST_TOP_N candidates get a website-only contact
+lookup (public email + LinkedIn; ENRICH_CONTACTS=0 to skip) and an outreach
+digest is emailed to EMAIL_RECIPIENT.
+
 All candidates pass through the three hard gates before scoring, then the
 Second Layer thesis filter, then 9-factor scoring. Writes to the
 "Vertical Pipeline" tab with the vertical name annotated.
@@ -51,6 +55,7 @@ from vertical_sources import (
     get_scrape_targets, passes_scrape_filter,
 )
 from new_sources import source_yc_launches, source_producthunt, VC_NEWSLETTER_FEEDS
+from contact_enrich import enrich_contact
 
 VERTICAL_TAB = "Vertical Pipeline"
 # On-demand runs (INDUSTRY_QUERY set) write here instead, to keep the curated
@@ -72,6 +77,14 @@ try:
     SCRAPE_MAX_NEW = int(os.environ.get("V21_SCRAPE_MAX_NEW") or "50")
 except ValueError:
     SCRAPE_MAX_NEW = 50
+
+# Outreach digest: scrape each top candidate's website for a public email
+# (ENRICH_CONTACTS=0 to skip) and send that many in the email digest.
+ENRICH_CONTACTS = os.environ.get("ENRICH_CONTACTS", "1").strip() != "0"
+try:
+    DIGEST_TOP_N = int(os.environ.get("DIGEST_TOP_N") or "10")
+except ValueError:
+    DIGEST_TOP_N = 10
 
 # Recent YC batches considered "early enough" for the stage gate.
 # Adjust as new batches are announced.
@@ -878,6 +891,36 @@ Return ONLY: SCORE: N | REASON: one short sentence"""
         return 1, "consumer Second Layer eval failed (LLM error) — excluded"
 
 
+def build_outreach_digest(scored: list) -> str:
+    """Plain-text digest of the top candidates with outreach details, for the
+    email to the analyst. `scored` is expected pre-sorted (best first); items
+    may carry a "contact" dict from enrich_contact()."""
+    lines = [f"{len(scored)} candidate(s) scored above threshold. Top {min(DIGEST_TOP_N, len(scored))} for outreach:\n"]
+    for i, c in enumerate(scored[:DIGEST_TOP_N], 1):
+        cand = c["candidate"]
+        contact = c.get("contact") or {}
+        lines.append(f"{i}. {cand.get('name', '?')}  —  {c['weighted_pct']}%  {c['decision']}")
+        if c.get("summary"):
+            lines.append(f"   {c['summary']}")
+        if c.get("founders"):
+            lines.append(f"   Founders: {c['founders']}")
+        lines.append(f"   Second Layer: {c.get('sl_reason', '')}")
+        if c.get("strengths"):
+            lines.append(f"   + {c['strengths']}")
+        if c.get("risks"):
+            lines.append(f"   - {c['risks']}")
+        website = contact.get("website") or cand.get("website") or "—"
+        email = contact.get("email") or "—"
+        linkedin = contact.get("linkedin") or cand.get("linkedin_url") or "—"
+        lines.append(f"   Website:  {website}")
+        lines.append(f"   Email:    {email}   ({contact.get('note', 'not looked up')})")
+        lines.append(f"   LinkedIn: {linkedin}")
+        lines.append("")
+    if len(scored) > DIGEST_TOP_N:
+        lines.append(f"(+{len(scored) - DIGEST_TOP_N} more in the sheet)")
+    return "\n".join(lines)
+
+
 def main():
     ai_client = get_anthropic_client()
     industry_query = os.environ.get("INDUSTRY_QUERY", "").strip()
@@ -1025,22 +1068,34 @@ def main():
     scored.sort(key=lambda x: x["weighted_pct"], reverse=True)
     print(f"\nScored above threshold: {len(scored)}")
 
+    # Step 5b: Contact enrichment for the top slice (website scrape only).
+    if scored and ENRICH_CONTACTS:
+        print(f"\nSTEP 5b: Contact lookup for top {min(DIGEST_TOP_N, len(scored))}")
+        print("-" * 60)
+        for c in scored[:DIGEST_TOP_N]:
+            info = enrich_contact(c["candidate"])
+            c["contact"] = info
+            # Fold enriched website/LinkedIn back onto the candidate so the sheet gets them.
+            if info.get("website"):
+                c["candidate"]["website"] = info["website"]
+            if info.get("linkedin") and not c["candidate"].get("linkedin_url"):
+                c["candidate"]["linkedin_url"] = info["linkedin"]
+            print(f"  {c['candidate']['name']:30s} email={info.get('email') or '—':30s} {info.get('note','')}")
+
     # Step 6: Write
     print(f"\nSTEP 5: Writing to '{target_tab}' tab")
     print("-" * 60)
     write_scored_candidates(sheet_client, target_tab, scored, vertical_label=name)
 
-    # Step 7: Email
+    # Step 7: Email digest
     if scored:
-        body_lines = [f"{c['candidate']['name']} — {c['weighted_pct']}% — {c['decision']}"
-                      for c in scored[:10]]
         if industry_query:
             subject = f"On-Demand Pipeline: {name} — {len(scored)} candidates"
-            body = f"Industry query: {industry_query}\nSynthesized vertical: {name}\n\n"
+            header = f"Industry query: {industry_query}\nSynthesized vertical: {name}\n"
         else:
             subject = f"Vertical Pipeline {name} — {len(scored)} candidates"
-            body = f"Vertical: {name}\n\n"
-        send_email_digest(subject=subject, body=body + "\n".join(body_lines))
+            header = f"Vertical: {name}\n"
+        send_email_digest(subject=subject, body=header + "\n" + build_outreach_digest(scored))
 
     print(f"\n{'='*60}")
     print(f"Pipeline run complete — {label}: {name}")
