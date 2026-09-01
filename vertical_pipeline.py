@@ -192,6 +192,11 @@ def source_sec_form_d(keywords: list, vertical_name: str, days_back: int = 30) -
                 key = name.lower()
                 if not name or key in seen_names:
                     continue
+                # Form D is filed by funds, SPVs, DSTs and holding entities too —
+                # keyword search drags them in. Drop anything that isn't an
+                # operating company by name.
+                if _FUND_ENTITY_RE.search(name):
+                    continue
                 seen_names.add(key)
                 candidates.append({
                     "name": name,
@@ -216,6 +221,42 @@ def source_sec_form_d(keywords: list, vertical_name: str, days_back: int = 30) -
 # ============================================================================
 # Source 1c: TechCrunch funding coverage (cross-vertical, keyword-filtered)
 # ============================================================================
+_FUNDING_HEADLINE_RE = re.compile(
+    r"([A-Z][A-Za-z0-9.\-& ]{2,40})\s+(?:raises?|secures?|closes?|lands?|nabs?|bags?|gets|nets|banks|snags)\s+\$(\d+(?:\.\d+)?)\s*([MK])",
+    re.IGNORECASE,
+)
+_HEADLINE_VERB_RE = re.compile(
+    r"\b(wants|plans|aims|hopes|is |are |launches|unveils|debuts|introduces|to make|to help|"
+    r"that |which |how |why |after |amid |could |says |thinks|bets|pivots)\b",
+    re.I,
+)
+_NAME_ONLY_RAISE_RE = re.compile(
+    r"^([A-Z][A-Za-z0-9.\-& ]{1,40}?)\s+(?:raises?|secures?|closes?|lands?|nabs?|bags?|gets|nets|banks|snags)\b",
+)
+
+
+def _plausible_company_name(name: str) -> bool:
+    name = (name or "").strip()
+    if not name or _HEADLINE_VERB_RE.search(name):
+        return False
+    return 1 <= len(name.split()) <= 5
+
+
+def _company_from_funding_headline(title: str):
+    """(name, funding_usd) from a funding headline, or (None, 0) if the title
+    isn't 'Company raises $N' shaped — better to drop than emit a headline."""
+    m = _FUNDING_HEADLINE_RE.search(title)
+    if m:
+        name = m.group(1).strip()
+        usd = float(m.group(2)) * (1_000_000 if m.group(3).upper() == "M" else 1_000)
+        return (name[:80] if _plausible_company_name(name) else None), usd
+    m2 = _NAME_ONLY_RAISE_RE.match(title)
+    if m2:
+        name = m2.group(1).strip()
+        return (name[:80] if _plausible_company_name(name) else None), 0.0
+    return None, 0.0
+
+
 def source_techcrunch(keywords: list, vertical_name: str) -> list:
     """Parse TechCrunch venture/startup feeds for seed rounds matching the vertical."""
     candidates = []
@@ -224,10 +265,6 @@ def source_techcrunch(keywords: list, vertical_name: str) -> list:
         "https://techcrunch.com/category/startups/feed/",
         "https://techcrunch.com/tag/seed-funding/feed/",
     ]
-    funding_pattern = re.compile(
-        r"([A-Z][A-Za-z0-9.\- ]{2,40})\s+(?:raises?|secures?|closes?|lands?|nabs?|bags?)\s+\$(\d+(?:\.\d+)?)\s*([MK])",
-        re.IGNORECASE,
-    )
     kw_lower = [k.lower() for k in keywords]
     seed_keywords = ["seed", "pre-seed", "series a"]
 
@@ -243,17 +280,10 @@ def source_techcrunch(keywords: list, vertical_name: str) -> list:
                     continue
                 if not any(s in blob for s in seed_keywords):
                     continue
-                match = funding_pattern.search(title)
-                funding_usd = 0
-                name = title.split(" raises")[0].split(" secures")[0].split(" closes")[0].strip()[:80]
-                if match:
-                    name = match.group(1).strip()[:80]
-                    amount = float(match.group(2))
-                    unit = match.group(3).upper()
-                    funding_usd = amount * (1_000_000 if unit == "M" else 1_000)
-                    if funding_usd > 15_000_000:
-                        continue
+                name, funding_usd = _company_from_funding_headline(title)
                 if not name:
+                    continue
+                if funding_usd > 15_000_000:
                     continue
                 candidates.append({
                     "name": name,
@@ -281,10 +311,6 @@ def source_techcrunch(keywords: list, vertical_name: str) -> list:
 def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
     """Parse vertical-specific publications for seed-stage funding announcements."""
     candidates = []
-    funding_pattern = re.compile(
-        r"([A-Z][A-Za-z0-9.\- ]{2,40})\s+(?:raises?|secures?|closes?|announces?|bags?)\s+\$(\d+(?:\.\d+)?)\s*([MK])",
-        re.IGNORECASE,
-    )
     seed_keywords = ["seed", "pre-seed", "series a", "$1m", "$2m", "$3m", "$5m", "$10m", "$15m"]
 
     for feed_url in rss_urls:
@@ -296,31 +322,11 @@ def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
                 combined = f"{title} {summary}".lower()
                 if not any(k in combined for k in seed_keywords):
                     continue
-                match = funding_pattern.search(title)
-                if not match:
-                    if not any(k in title.lower() for k in ["seed", "pre-seed"]):
-                        continue
-                    name_fallback = title.split(" raises")[0].split(" secures")[0].split(" closes")[0].strip()[:80]
-                    if not name_fallback:
-                        continue
-                    candidates.append({
-                        "name": name_fallback,
-                        "website": entry.get("link", ""),
-                        "description": summary[:500],
-                        "industry": vertical_name,
-                        "hq_city": "", "hq_country": "United States",
-                        "founded_date": "", "headcount": 0,
-                        "total_funding_usd": 0, "last_funding_round": "seed",
-                        "last_funding_date": entry.get("published", ""),
-                        "linkedin_url": "",
-                        "_source": f"RSS ({feed_url.split('/')[2]})",
-                    })
+                # Only keep items where a real "Company raises $N" name can be
+                # pulled from the title — otherwise it's a trend/analysis headline.
+                name, funding_usd = _company_from_funding_headline(title)
+                if not name:
                     continue
-
-                name = match.group(1).strip()
-                amount = float(match.group(2))
-                unit = match.group(3).upper()
-                funding_usd = amount * (1_000_000 if unit == "M" else 1_000)
                 if funding_usd > 15_000_000:
                     continue
 
@@ -753,8 +759,14 @@ _LEGAL_SUFFIX_RE = re.compile(
     r"[\s,.]+(inc|incorporated|llc|l\.l\.c|corp|corporation|co|ltd|limited|lp|l\.p|plc|holdings)\.?$",
     re.I,
 )
-# Names that mean "investment vehicle", not "the operating company".
-_FUND_ENTITY_RE = re.compile(r"\b(spv|fund|series|capital|ventures?|partners|trust|holdings)\b", re.I)
+# Names that mean "investment vehicle / holding entity", not "operating startup".
+# Filters both the SEC Form D source and the funding-verification lookup.
+_FUND_ENTITY_RE = re.compile(
+    r"\b(spv|fund|feeder|sicav|reit|dst|s\.?c\.?sp|investments?|activist|ventures?|"
+    r"partners|capital|holdings|trust|advis[eo]rs?|management|co[- ]?invest(?:ment)?s?|"
+    r"offshore|series)\b|\bl\.?\s?p\.?\b",
+    re.I,
+)
 
 
 def _norm_company(name: str) -> str:
