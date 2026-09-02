@@ -189,3 +189,28 @@ def scan_site_for_funding(website: str, timeout: int = 10, max_pages: int = 4) -
         }
         time.sleep(0.2)
     return {}
+
+
+# --- Company context for scoring --------------------------------------------
+_CONTEXT_PATHS = ["", "/about", "/product", "/solutions", "/how-it-works", "/company", "/customers"]
+
+
+def fetch_company_context(website: str, timeout: int = 10, max_pages: int = 4, cap: int = 3500) -> str:
+    """Pull readable text from a company's own site to give the 9-factor scorer
+    real material instead of a one-line blurb. Returns '' if no usable site."""
+    if not website or not website.lower().startswith("http") or not _looks_like_real_site(website):
+        return ""
+    chunks, pages = [], 0
+    for path in _CONTEXT_PATHS:
+        if pages >= max_pages:
+            break
+        html = _fetch(urljoin(website, path) if path else website, timeout)
+        if not html:
+            continue
+        pages += 1
+        html = re.sub(r"(?is)<(script|style|noscript|svg|header|footer|nav)\b.*?</\1>", " ", html)
+        txt = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
+        if len(txt) > 120:
+            chunks.append(f"[{path or '/'}] {txt}")
+        time.sleep(0.2)
+    return (" ".join(chunks))[:cap]
