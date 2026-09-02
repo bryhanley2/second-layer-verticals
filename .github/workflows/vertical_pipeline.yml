@@ -1,8 +1,10 @@
 name: Vertical Pipeline
 
+# MANUAL ONLY — no cron. Runs only when you click "Run workflow" or fire a
+# repository_dispatch. To re-enable a daily schedule later, add back:
+#   schedule:
+#     - cron: '30 10 * * *'
 on:
-  schedule:
-    - cron: '30 10 * * *'
   workflow_dispatch:
     inputs:
       vertical_index:
@@ -46,8 +48,12 @@ jobs:
           # On-demand industry query: from a manual run's input, or a repository_dispatch
           # (type: run-industry-pipeline) client_payload.industry_query.
           INDUSTRY_QUERY: ${{ github.event.inputs.industry_query || github.event.client_payload.industry_query }}
-          # Optional: set repo variable PIPELINE_MODEL to pin/trial a model. Blank -> code default.
+          # Optional: PIPELINE_MODEL = judgement model (scoring/eval/verify; default opus-4-7);
+          # PIPELINE_MODEL_EXTRACT = cheap model for scrape name-extraction (default haiku-4-5);
+          # RESEARCH_MAX_QUERIES = cap on Claude research calls per run (default 12).
           PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
+          PIPELINE_MODEL_EXTRACT: ${{ vars.PIPELINE_MODEL_EXTRACT }}
+          RESEARCH_MAX_QUERIES: ${{ vars.RESEARCH_MAX_QUERIES }}
           # Optional: set repo variable EXTRA_SOURCES to "0" to skip YC Launches / Product Hunt / VC newsletters.
           EXTRA_SOURCES: ${{ vars.EXTRA_SOURCES }}
           # Optional: SCRAPE_LAYER="0" skips the scrape layer; SCRAPE_MAX_NEW caps new companies per run;
