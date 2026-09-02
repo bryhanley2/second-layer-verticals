@@ -196,7 +196,7 @@ def passes_funding_gate(candidate: dict):
 
 
 def passes_age_gate(candidate: dict):
-    founded_year = parse_year(candidate.get("founded_date", ""))
+    founded_year = parse_year(candidate.get("founded_date") or candidate.get("founded_year") or "")
     if founded_year:
         age = datetime.now().year - founded_year
         if age > MAX_COMPANY_AGE_YEARS:
@@ -418,16 +418,27 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
 
 # ---------- 9-factor scoring ----------
 def score_candidate(ai_client: Anthropic, candidate: dict, sl_reason: str):
+    _raised = safe_float(candidate.get("total_funding_usd", 0))
+    if _raised > 0:
+        raised_line = f"${_raised:,.0f}"
+    else:
+        # Don't show "$0" — it reads to the model as "raised nothing / not real".
+        raised_line = (f"not publicly disclosed (early-stage; sourced via "
+                       f"{candidate.get('_source', 'the pipeline')})")
+    founded = candidate.get("founded_date") or candidate.get("founded_year") or "unknown"
     prompt = f"""Score this seed-stage company on 9 factors (1-10 each).
 
 Company: {candidate.get("name")}
 Description: {str(candidate.get("description", ""))}
 Stage: {candidate.get("last_funding_round", candidate.get("stage", "unknown"))}
-Total raised: ${safe_float(candidate.get('total_funding_usd', 0)):,.0f}
+Total raised: {raised_line}
 Headcount: {candidate.get("headcount", "unknown")}
-Founded: {candidate.get("founded_date", "unknown")}
+Founded: {founded}
 HQ: {candidate.get("hq_city", "")}, {candidate.get("hq_country", "")}
 Second Layer assessment: {sl_reason}
+
+If information for a factor is genuinely unavailable, score it 5 and note the gap
+in RISKS — do not invent specifics.
 
 Score 1-10 (10=exceptional, 5=average, 1=weak):
 1A. Founder-Market Fit
