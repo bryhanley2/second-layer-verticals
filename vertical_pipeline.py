@@ -50,7 +50,7 @@ from pipeline_utils import (
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
     verify_size_post_enrichment, confirm_funding_report,
     decision_from_score, write_scored_candidates, read_existing_names,
-    send_email_digest, MIN_SCORE_PCT, safe_float, ensure_tab,
+    send_email_digest, MIN_SCORE_PCT, WRITE_FLOOR_PCT, safe_float, ensure_tab,
     record_llm_error, llm_error_count, llm_error_summary,
 )
 from vertical_sources import (
@@ -92,6 +92,15 @@ try:
     RESEARCH_MAX_QUERIES = int(os.environ.get("RESEARCH_MAX_QUERIES") or "12")
 except ValueError:
     RESEARCH_MAX_QUERIES = 12
+
+# Deep enrichment: for the top-scoring candidates only, one Claude web-search
+# call to pull sourced founders / funding / traction, then re-score. Keeps cost
+# down (a few calls/run) while the best candidates get real data.
+DEEP_ENRICH = os.environ.get("DEEP_ENRICH", "1").strip() != "0"
+try:
+    ENRICH_TOP_N = int(os.environ.get("ENRICH_TOP_N") or "3")
+except ValueError:
+    ENRICH_TOP_N = 3
 
 # Outreach digest: scrape each top candidate's website for a public email
 # (ENRICH_CONTACTS=0 to skip) and send that many in the email digest.
@@ -1356,11 +1365,43 @@ def _funding_line(cand: dict) -> str:
     return f"${val:,.0f}{(' as of ' + date) if date else ''}{tag} — {src}" + warn
 
 
+def _deep_enrich(ai_client, candidate: dict) -> str:
+    """One web-search-backed Claude call to pull sourced founders / funding /
+    traction for a top candidate. Returns a text summary, or '' on failure."""
+    nm = candidate.get("name", "")
+    site = candidate.get("website", "")
+    q = (f'Research the seed-stage startup "{nm}"'
+         + (f" — its site is {site}." if site else ".")
+         + " Report each item ONLY if you can cite a source:\n"
+           "- Founders: full names, titles, prior companies/roles\n"
+           "- Most recent funding: round type, amount, lead investor, date\n"
+           "- Traction: named customers, pilots, contracts, or revenue\n"
+           "- What the product actually does (1-2 sentences)\n"
+           "If you cannot confirm this is a real company, say so plainly.")
+    tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 4}]
+    messages = [{"role": "user", "content": q}]
+    try:
+        resp = None
+        for _ in range(4):  # allow pause_turn continuations
+            resp = ai_client.messages.create(model=MODEL, max_tokens=1500,
+                                             tools=tools, messages=messages)
+            if resp.stop_reason != "pause_turn":
+                break
+            messages.append({"role": "assistant", "content": resp.content})
+        return "".join(b.text for b in resp.content
+                       if getattr(b, "type", "") == "text").strip()[:3000]
+    except Exception as e:
+        record_llm_error(f"deep enrich {nm}", e)
+        return ""
+
+
 def build_outreach_digest(scored: list) -> str:
     """Plain-text digest of the top candidates with outreach details, for the
     email to the analyst. `scored` is expected pre-sorted (best first); items
     may carry a "contact" dict from enrich_contact()."""
-    lines = [f"{len(scored)} candidate(s) scored above threshold. Top {min(DIGEST_TOP_N, len(scored))} for outreach:\n"]
+    rec_n = sum(1 for c in scored if c.get("_recommended"))
+    lines = [f"{len(scored)} candidate(s) written ({rec_n} recommended). "
+             f"Top {min(DIGEST_TOP_N, len(scored))} by score:\n"]
     for i, c in enumerate(scored[:DIGEST_TOP_N], 1):
         cand = c["candidate"]
         contact = c.get("contact") or {}
@@ -1546,24 +1587,46 @@ def main():
             c["_site_text"] = fetch_company_context(site) if site else ""
             print(f"  {c.get('name', '?'):30s} {len(c['_site_text'])} chars from site")
 
-    # Step 5: 9-factor scoring
+    # Step 4: 9-factor scoring (all Second Layer survivors — the score ranks
+    # them, it no longer filters; anything >= WRITE_FLOOR_PCT is written).
     print(f"\nSTEP 4: 9-factor scoring")
     print("-" * 60)
-    scored, below = [], []
+    recs = []
     for c in passed_sl:
         result = score_candidate(ai_client, c, c["_sl_reason"])
         pct = result["weighted_pct"]
-        rec = {"candidate": c, "sl_reason": c["_sl_reason"], **result,
-               "decision": decision_from_score(pct)}
-        if pct < MIN_SCORE_PCT:
-            below.append(rec)
-            print(f"  {c['name']:33s} {pct:5.1f}%  (below {MIN_SCORE_PCT}) [{c.get('_source', '?')}]")
-            continue
-        scored.append(rec)
-        print(f"  {c['name']:33s} {pct:5.1f}%  {rec['decision']} [{c.get('_source', '?')}]")
+        recs.append({"candidate": c, "sl_reason": c["_sl_reason"], **result,
+                     "decision": decision_from_score(pct)})
+    recs.sort(key=lambda x: x["weighted_pct"], reverse=True)
 
-    scored.sort(key=lambda x: x["weighted_pct"], reverse=True)
-    print(f"\nScored above threshold ({MIN_SCORE_PCT}%): {len(scored)}  |  below: {len(below)}")
+    # Step 4b: deep-enrich + re-score the top ENRICH_TOP_N (web search).
+    if DEEP_ENRICH and recs:
+        n = min(ENRICH_TOP_N, len(recs))
+        print(f"\nSTEP 4b: Deep research on the top {n} (web search + re-score)")
+        print("-" * 60)
+        for rec in recs[:n]:
+            cand = rec["candidate"]
+            deep = _deep_enrich(ai_client, cand)
+            if not deep:
+                print(f"  {cand.get('name', '?'):30s} no research result")
+                continue
+            cand["_deep_context"] = deep
+            new = score_candidate(ai_client, cand, rec["sl_reason"])
+            old_pct = rec["weighted_pct"]
+            rec.update(new)
+            rec["decision"] = decision_from_score(rec["weighted_pct"])
+            print(f"  {cand.get('name', '?'):30s} {old_pct:.1f}% -> {rec['weighted_pct']:.1f}%")
+        recs.sort(key=lambda x: x["weighted_pct"], reverse=True)
+
+    scored = [r for r in recs if r["weighted_pct"] >= WRITE_FLOOR_PCT]
+    for r in scored:
+        r["_recommended"] = r["weighted_pct"] >= MIN_SCORE_PCT
+        c = r["candidate"]
+        print(f"  {c['name']:33s} {r['weighted_pct']:5.1f}%  {r['decision']} [{c.get('_source', '?')}]")
+    dropped = len(recs) - len(scored)
+    print(f"\nWriting {len(scored)} (>= {WRITE_FLOOR_PCT}%); "
+          f"{sum(r['_recommended'] for r in scored)} recommended (>= {MIN_SCORE_PCT}%); "
+          f"{dropped} below floor")
 
     # Step 5b: Contact enrichment for the top slice (website scrape only).
     if scored and ENRICH_CONTACTS:

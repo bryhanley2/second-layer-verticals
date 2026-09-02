@@ -224,7 +224,13 @@ This exists because the pipeline's original hard gate runs *before* funding enri
 | 6 | Capital Efficiency | 10% |
 | 7 | Investor Signal | 10% |
 
-**Minimum score to write:** `MIN_SCORE_PCT` (default **58**). Before scoring, each Second Layer survivor is enriched with its own website text.
+**Scoring is a ranking, not a gate.** Every candidate that passes the hard gates + the Second Layer filter is scored and **written to the sheet, sorted by score**, as long as it clears `WRITE_FLOOR_PCT` (default 45 — below that the data is too thin to be worth a reviewer's time). `MIN_SCORE_PCT` (default 64) tags a row "recommended" via its Decision label; it doesn't filter.
+
+**Two enrichment passes feed the scorer:**
+1. Every Second Layer survivor's own **website text** (`/`, `/about`, `/product`, `/solutions`).
+2. The top `ENRICH_TOP_N` (default 3) by initial score get one **web-search Claude call** for sourced founders / funding / traction, then are **re-scored** (`DEEP_ENRICH=0` to skip). ~$0.20/run.
+
+Decision tiers: `STRONG YES` ≥80 · `YES — deep dive` ≥70 · `REVIEW — recommended` ≥64 · `WATCH — needs verification` ≥55 · `BACKLOG — thin data` ≥45.
 
 ### Hard Gates (applied before scoring)
 
@@ -280,7 +286,10 @@ Every run costs Anthropic API tokens (rough estimate: ~$0.50 for a typical verti
 | `PIPELINE_MODEL` | `claude-opus-4-7` | Judgement calls (scoring, Second Layer, funding verify). `claude-sonnet-5` ≈ 2.5× cheaper. |
 | `PIPELINE_MODEL_EXTRACT` | `claude-haiku-4-5` | Scrape name-extraction (mechanical). Already the cheap model. |
 | `RESEARCH_MAX_QUERIES` | `12` | Cap on Claude research calls/run (V21 defines ~24 — the rest are skipped unless you raise this). Set `4` for V21 — the research queries overlap heavily. |
-| `MIN_SCORE_PCT` | `58` | Weighted score to write a candidate. Lowered from 65 to surface the 58–64 "early signal" band for review. |
+| `MIN_SCORE_PCT` | `64` | Score at/above which a written row is tagged "recommended". Does not filter. |
+| `WRITE_FLOOR_PCT` | `45` | Below this a candidate is dropped, not written. |
+| `DEEP_ENRICH` | `1` | `0` skips the web-search + re-score pass on the top candidates. |
+| `ENRICH_TOP_N` | `3` | How many top candidates get the deep research pass (~$0.06 each). |
 | `SCRAPE_LAYER` | `1` | `0` disables the whole scrape layer. |
 | `SCRAPE_HEADLESS` | `1` | `0` skips the Chromium fallback (also cuts ~1–2 min of CI per run). |
 | `SCRAPE_RETRY_DAYS` | `60` | A scrape company that keeps soft-failing is retried each run until it's this old, then dropped. |

@@ -26,12 +26,18 @@ from google.oauth2.service_account import Credentials
 # `${{ vars.X }}` as an empty string, and get(key, default) returns "" for
 # key-exists-but-empty. `or` falls back for both missing and empty.
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID") or "102k3pj7JjEhSXWgyBS144mgHd93MZywoWVyjWIonX50"
-# Minimum weighted score to write a candidate to the sheet. Lowered from 65 to
-# surface the 58-64 "early signal" band for review; raise via MIN_SCORE_PCT.
+# Score at/above which a candidate is tagged "recommended". It no longer
+# filters — every gate + Second Layer survivor is written and ranked by score
+# (see WRITE_FLOOR_PCT). Raise via MIN_SCORE_PCT.
 try:
-    MIN_SCORE_PCT = int(os.environ.get("MIN_SCORE_PCT") or "58")
+    MIN_SCORE_PCT = int(os.environ.get("MIN_SCORE_PCT") or "64")
 except ValueError:
-    MIN_SCORE_PCT = 58
+    MIN_SCORE_PCT = 64
+# Below this, the data is too thin for the row to be worth a reviewer's time.
+try:
+    WRITE_FLOOR_PCT = int(os.environ.get("WRITE_FLOOR_PCT") or "45")
+except ValueError:
+    WRITE_FLOOR_PCT = 45
 
 # Anthropic model for judgement-heavy calls — scoring, Second Layer eval, funding
 # verification, vertical synthesis. Keep this capable. Override with PIPELINE_MODEL.
@@ -433,6 +439,8 @@ def score_candidate(ai_client: Anthropic, candidate: dict, sl_reason: str):
     founded = candidate.get("founded_date") or candidate.get("founded_year") or "unknown"
     site_text = str(candidate.get("_site_text", "")).strip()
     site_block = f"\n\nFrom the company's own website:\n{site_text}\n" if site_text else ""
+    deep = str(candidate.get("_deep_context", "")).strip()
+    deep_block = f"\n\nResearched (sourced) — founders, funding, traction:\n{deep}\n" if deep else ""
     prompt = f"""Score this seed-stage company on 9 factors (1-10 each).
 
 Company: {candidate.get("name")}
@@ -442,7 +450,7 @@ Total raised: {raised_line}
 Headcount: {candidate.get("headcount", "unknown")}
 Founded: {founded}
 HQ: {candidate.get("hq_city", "")}, {candidate.get("hq_country", "")}
-Second Layer assessment: {sl_reason}{site_block}
+Second Layer assessment: {sl_reason}{site_block}{deep_block}
 
 Score each factor 1-10 using the anchors. If the evidence for a factor is
 genuinely missing, score it 4 (not 5) and say so in RISKS — thin data is a real
@@ -510,9 +518,9 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
             if key in {"1A", "1B", "1C", "2A", "3A", "3B", "5", "6", "7"}:
                 try:
                     digits = ''.join(c for c in val if c.isdigit())[:2]
-                    scores[key] = max(1, min(10, int(digits))) if digits else 4
+                    scores[key] = max(1, min(10, int(digits))) if digits else 5
                 except ValueError:
-                    scores[key] = 4
+                    scores[key] = 5
             elif key.upper() == "SUMMARY":
                 meta["summary"] = val
             elif key.upper() == "STRENGTHS":
@@ -525,7 +533,7 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
         parsed = len(scores)
         weighted = 0.0
         for factor, weight in FACTOR_WEIGHTS.items():
-            weighted += scores.get(factor, 4) * weight
+            weighted += scores.get(factor, 5) * weight
         pct = round(weighted * 10, 1)
         if parsed < 7:  # the model didn't return most factors — don't trust the number
             record_llm_error(
@@ -550,15 +558,15 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
 
 
 def decision_from_score(pct: float) -> str:
-    if pct >= 82:
+    if pct >= 80:
         return "★★★★★ STRONG YES"
-    if pct >= 72:
-        return "★★★★ YES"
+    if pct >= 70:
+        return "★★★★ YES — deep dive"
     if pct >= 64:
-        return "★★★ DEEP DIVE"
+        return "★★★ REVIEW — recommended"
     if pct >= 55:
-        return "★★ WATCH — early signal"
-    return "★ PASS"
+        return "★★ WATCH — needs verification"
+    return "★ BACKLOG — thin data"
 
 
 # ---------- Sheet writers ----------

@@ -54,8 +54,13 @@ jobs:
           PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
           PIPELINE_MODEL_EXTRACT: ${{ vars.PIPELINE_MODEL_EXTRACT }}
           RESEARCH_MAX_QUERIES: ${{ vars.RESEARCH_MAX_QUERIES }}
-          # Optional: MIN_SCORE_PCT = weighted score needed to write a candidate (default 58).
+          # Scoring: every gate + Second Layer survivor >= WRITE_FLOOR_PCT (45) is written and
+          # ranked; MIN_SCORE_PCT (64) tags "recommended". DEEP_ENRICH runs a web-search +
+          # re-score on the top ENRICH_TOP_N (3).
           MIN_SCORE_PCT: ${{ vars.MIN_SCORE_PCT }}
+          WRITE_FLOOR_PCT: ${{ vars.WRITE_FLOOR_PCT }}
+          DEEP_ENRICH: ${{ vars.DEEP_ENRICH }}
+          ENRICH_TOP_N: ${{ vars.ENRICH_TOP_N }}
           # Optional: set repo variable EXTRA_SOURCES to "0" to skip YC Launches / Product Hunt / VC newsletters.
           EXTRA_SOURCES: ${{ vars.EXTRA_SOURCES }}
           # Optional: SCRAPE_LAYER="0" skips the scrape layer; SCRAPE_MAX_NEW caps new companies per run;
