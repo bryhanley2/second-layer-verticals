@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 import requests
 import feedparser
 from pipeline_utils import (
-    get_sheet_client, get_anthropic_client, SHEET_ID, MODEL,
+    get_sheet_client, get_anthropic_client, SHEET_ID, MODEL, MODEL_EXTRACT,
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
     verify_size_post_enrichment, confirm_funding_report,
     decision_from_score, write_scored_candidates, read_existing_names,
@@ -79,6 +79,12 @@ try:
     SCRAPE_MAX_NEW = int(os.environ.get("SCRAPE_MAX_NEW") or os.environ.get("V21_SCRAPE_MAX_NEW") or "50")
 except ValueError:
     SCRAPE_MAX_NEW = 50
+
+# Claude research fan-out cap (each search term = one Claude call).
+try:
+    RESEARCH_MAX_QUERIES = int(os.environ.get("RESEARCH_MAX_QUERIES") or "12")
+except ValueError:
+    RESEARCH_MAX_QUERIES = 12
 
 # Outreach digest: scrape each top candidate's website for a public email
 # (ENRICH_CONTACTS=0 to skip) and send that many in the email digest.
@@ -363,7 +369,9 @@ def source_vertical_claude_research(ai_client, search_terms: list, vertical_name
     and acceptable to source here, but are still verified downstream.
     """
     candidates = []
-    for term in search_terms:
+    # Each search term is one Claude call. Cap the fan-out (V21 defines ~24);
+    # raise RESEARCH_MAX_QUERIES to use more.
+    for term in search_terms[:RESEARCH_MAX_QUERIES]:
         prompt = f"""List up to 5 real, specific seed-stage companies matching: "{term}"
 
 Must be:
@@ -617,7 +625,7 @@ Return ONE JSON object per line and nothing else:
 {page_text}"""
     try:
         resp = ai_client.messages.create(
-            model=MODEL, max_tokens=1500,
+            model=MODEL_EXTRACT, max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.content[0].text.strip()

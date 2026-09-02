@@ -264,12 +264,27 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 
 | Workflow | File | Schedule | Trigger |
 |----------|------|----------|---------|
-| Vertical Pipeline | `vertical_pipeline.yml` | Daily 10:30 UTC | Cron + manual (index 0–21) + `industry_query` + `repository_dispatch` |
-| Test APIs | `test_apis.yml` | Manual | GitHub Actions |
+| Vertical Pipeline | `vertical_pipeline.yml` | **Manual only** (no cron) | "Run workflow" (`vertical_index` or `industry_query`) + `repository_dispatch` |
+| Test APIs | `test_apis.yml` | Manual | "Run workflow" |
 
-*(The Main Pipeline workflow runs from its own repo.)*
+*(The Main Pipeline workflow runs from its own repo. To re-add a daily schedule here, uncomment the `schedule:` block in `vertical_pipeline.yml`.)*
 
 ---
+
+## Cost Controls
+
+Every run costs Anthropic API tokens (rough estimate: ~$0.50 for a typical vertical, ~$1 for V21). Levers, set as GitHub **repo variables** (Settings → Secrets and variables → Actions → Variables):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `PIPELINE_MODEL` | `claude-opus-4-7` | Judgement calls (scoring, Second Layer, funding verify). `claude-sonnet-5` ≈ 2.5× cheaper. |
+| `PIPELINE_MODEL_EXTRACT` | `claude-haiku-4-5` | Scrape name-extraction (mechanical). Already the cheap model. |
+| `RESEARCH_MAX_QUERIES` | `12` | Cap on Claude research calls/run (V21 defines ~24 — the rest are skipped unless you raise this). |
+| `SCRAPE_LAYER` | `1` | `0` disables the whole scrape layer. |
+| `EXTRA_SOURCES` | `1` | `0` disables YC Launch HN / Product Hunt / VC newsletters (all free APIs, but they add candidates → more scoring calls). |
+| `SCRAPE_HEADLESS` | `1` | `0` skips the Chromium fallback (also cuts ~1–2 min of CI per run). |
+
+Scoring and Second Layer evaluation stay on the capable model regardless — candidate quality is not traded for cost there.
 
 ## On-Demand Pipeline (any industry)
 
