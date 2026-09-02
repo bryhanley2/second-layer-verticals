@@ -241,9 +241,17 @@ _NAME_ONLY_RAISE_RE = re.compile(
 )
 
 
+_GENERIC_NAME = {
+    "our portfolio", "portfolio", "learn more", "read more", "case study",
+    "view all", "see all", "load more", "companies", "our companies", "team",
+    "our team", "about", "about us", "contact", "contact us", "investments",
+    "our investments", "back", "home", "explore", "news", "insights", "the team",
+}
+
+
 def _plausible_company_name(name: str) -> bool:
     name = (name or "").strip()
-    if not name or _HEADLINE_VERB_RE.search(name):
+    if not name or name.lower() in _GENERIC_NAME or _HEADLINE_VERB_RE.search(name):
         return False
     return 1 <= len(name.split()) <= 5
 
@@ -643,12 +651,18 @@ Return ONE JSON object per line and nothing else:
         except json.JSONDecodeError:
             continue
         nm = str(c.get("name", "")).strip()
-        if nm:
-            out.append({
-                "name": nm[:80],
-                "website": str(c.get("website", "") or "").strip()[:300],
-                "note": str(c.get("note", "") or "").strip()[:200],
-            })
+        # Reject reasoning fragments the extractor sometimes emits as a "name"
+        # (e.g. "Diversified Technologies (Frore Systems is not seed — skipping)").
+        if not _plausible_company_name(re.sub(r"\s*\(.*?\)\s*", "", nm)) or "skip" in nm.lower():
+            continue
+        site = str(c.get("website", "") or "").strip()
+        if not site.lower().startswith("http"):
+            site = ""
+        out.append({
+            "name": re.sub(r"\s*\(.*?\)\s*$", "", nm)[:80],
+            "website": site[:300],
+            "note": str(c.get("note", "") or "").strip()[:200],
+        })
     return out
 
 
@@ -693,13 +707,29 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
     # fails downstream isn't re-extracted every run. The seen tab is cheap to prune.
     _record_scrape_seen(sheet_client, [(n, u, note) for (n, _w, note, u) in selected])
 
-    return [
-        _adapt_extra_record(
-            {"name": n, "url": w or u, "description": note, "source": "V21 Scrape"},
+    out = []
+    for (n, w, note, u) in selected:
+        rec = _adapt_extra_record(
+            # website: the company's OWN site if the extractor found one — never
+            # the fund/portfolio page (u), which would send contact-enrichment to
+            # the fund's inbox.
+            {"name": n, "url": w if w and not _same_host(w, u) else "",
+             "description": note, "source": "Scrape"},
             vertical["name"],
         )
-        for (n, w, note, u) in selected
-    ]
+        rec["_scrape_source_url"] = u
+        out.append(rec)
+    return out
+
+
+def _same_host(a: str, b: str) -> bool:
+    from urllib.parse import urlparse
+    try:
+        ha = urlparse(a).netloc.lower().removeprefix("www.")
+        hb = urlparse(b).netloc.lower().removeprefix("www.")
+        return bool(ha) and ha == hb
+    except Exception:
+        return False
 
 
 def _record_scrape_seen(sheet_client, rows: list) -> None:
@@ -1031,13 +1061,16 @@ def _finalize_unverified(candidates: list) -> None:
 # Dedup
 # ============================================================================
 def deduplicate(candidates: list, existing_names: set) -> list:
-    seen = set(existing_names)
+    """Dedup on the normalized company name (strips Inc/LLC/punctuation) so
+    'Pearl Street' / 'Pearl Street Technologies, Inc.' collapse to one."""
+    seen = {_norm_company(n) for n in existing_names if n}
     unique = []
     for c in candidates:
-        name = str(c.get("name", "")).strip().lower()
-        if not name or name in seen:
+        raw = str(c.get("name", "")).strip()
+        key = _norm_company(raw)
+        if not key or key in seen:
             continue
-        seen.add(name)
+        seen.add(key)
         unique.append(c)
     return unique
 
@@ -1219,6 +1252,12 @@ def main():
         print("[scrape] skipped (SCRAPE_LAYER=0)")
     print(f"\nTotal raw: {len(candidates)}")
 
+    # Step 1a: Dedup FIRST — don't spend funding-verification / scoring calls on
+    # the same company sourced 2-3 ways.
+    existing = read_existing_names(sheet_client, target_tab)
+    candidates = deduplicate(candidates, existing)
+    print(f"After dedup: {len(candidates)}")
+
     # Step 1b: Verify funding for $0 candidates before gating
     print("\nSTEP 1b: Verifying zero-funding candidates")
     print("-" * 60)
@@ -1237,11 +1276,6 @@ def main():
             print(f"  {verdict}: {c.get('name', '?')} — {note}")
     print(f"Confirmed: {len(candidates) - sum(_fc.values())} clean, " +
           (", ".join(f"{n}×{v}" for v, n in _fc.items()) if _fc else "0 flagged"))
-
-    # Step 2: Dedup
-    existing = read_existing_names(sheet_client, target_tab)
-    candidates = deduplicate(candidates, existing)
-    print(f"After dedup: {len(candidates)}")
 
     # Step 3: Three hard gates
     print(f"\nSTEP 2: Three hard gates")

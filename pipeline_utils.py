@@ -401,10 +401,14 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text.strip()
-        parts = text.split("|", 1)
-        score = int(parts[0].strip()[0])
-        reason = parts[1].strip() if len(parts) > 1 else ""
-        return score, reason
+        # Claude sometimes prefixes "SCORE: 3 | ..." or "Score|..." — pull the
+        # first 1-3 digit in the text rather than assuming position 0.
+        m = re.search(r"[123]", text)
+        if not m:
+            raise ValueError(f"no 1-3 score in Second Layer response: {text[:80]!r}")
+        score = int(m.group(0))
+        reason = text.split("|", 1)[1].strip() if "|" in text else text[m.end():].lstrip(" :|-").strip()
+        return score, reason[:200]
     except Exception as e:
         record_llm_error(f"Second Layer eval for {candidate.get('name')}", e)
         # Fail CLOSED: callers treat score >= 2 as "passes the thesis filter", so a
