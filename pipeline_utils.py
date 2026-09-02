@@ -22,16 +22,19 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ---------- Constants ----------
-SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "102k3pj7JjEhSXWgyBS144mgHd93MZywoWVyjWIonX50")
+# NOTE: use `or` not the 2-arg get() default — GitHub Actions passes an unset
+# `${{ vars.X }}` as an empty string, and get(key, default) returns "" for
+# key-exists-but-empty. `or` falls back for both missing and empty.
+SHEET_ID = os.environ.get("GOOGLE_SHEET_ID") or "102k3pj7JjEhSXWgyBS144mgHd93MZywoWVyjWIonX50"
 MIN_SCORE_PCT = 65
 
 # Anthropic model for judgement-heavy calls — scoring, Second Layer eval, funding
 # verification, vertical synthesis. Keep this capable. Override with PIPELINE_MODEL.
-MODEL = os.environ.get("PIPELINE_MODEL", "claude-opus-4-7")
+MODEL = os.environ.get("PIPELINE_MODEL") or "claude-opus-4-7"
 
 # Cheaper model for the mechanical scrape-extraction step (pull company names out
 # of a page — no judgement). ~5x cheaper; override with PIPELINE_MODEL_EXTRACT.
-MODEL_EXTRACT = os.environ.get("PIPELINE_MODEL_EXTRACT", "claude-haiku-4-5")
+MODEL_EXTRACT = os.environ.get("PIPELINE_MODEL_EXTRACT") or "claude-haiku-4-5"
 
 ALLOWED_STAGES = {
     "pre-seed", "preseed", "pre_seed", "seed",
