@@ -9,7 +9,7 @@ import json
 try:
     from pipeline_utils import MODEL
 except Exception:
-    MODEL = os.environ.get("PIPELINE_MODEL", "claude-opus-4-7")
+    MODEL = os.environ.get("PIPELINE_MODEL") or "claude-opus-4-7"
 
 print("="*60)
 print("API CREDENTIAL TEST")
