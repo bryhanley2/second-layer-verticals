@@ -54,13 +54,16 @@ jobs:
           PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
           PIPELINE_MODEL_EXTRACT: ${{ vars.PIPELINE_MODEL_EXTRACT }}
           RESEARCH_MAX_QUERIES: ${{ vars.RESEARCH_MAX_QUERIES }}
+          # Optional: MIN_SCORE_PCT = weighted score needed to write a candidate (default 58).
+          MIN_SCORE_PCT: ${{ vars.MIN_SCORE_PCT }}
           # Optional: set repo variable EXTRA_SOURCES to "0" to skip YC Launches / Product Hunt / VC newsletters.
           EXTRA_SOURCES: ${{ vars.EXTRA_SOURCES }}
           # Optional: SCRAPE_LAYER="0" skips the scrape layer; SCRAPE_MAX_NEW caps new companies per run;
-          # SCRAPE_HEADLESS="0" forces static-only fetch (no Chromium fallback).
+          # SCRAPE_HEADLESS="0" forces static-only fetch; SCRAPE_RETRY_DAYS = retry window for pending companies.
           SCRAPE_LAYER: ${{ vars.SCRAPE_LAYER }}
           SCRAPE_MAX_NEW: ${{ vars.SCRAPE_MAX_NEW }}
           SCRAPE_HEADLESS: ${{ vars.SCRAPE_HEADLESS }}
+          SCRAPE_RETRY_DAYS: ${{ vars.SCRAPE_RETRY_DAYS }}
           # Optional: ENRICH_CONTACTS="0" skips the website email lookup; DIGEST_TOP_N sets how many go in the email.
           ENRICH_CONTACTS: ${{ vars.ENRICH_CONTACTS }}
           DIGEST_TOP_N: ${{ vars.DIGEST_TOP_N }}

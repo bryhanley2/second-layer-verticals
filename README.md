@@ -224,7 +224,7 @@ This exists because the pipeline's original hard gate runs *before* funding enri
 | 6 | Capital Efficiency | 10% |
 | 7 | Investor Signal | 10% |
 
-**Minimum score thresholds:** Pre-seed: 55% | Seed: 65% | Unknown: 60%
+**Minimum score to write:** `MIN_SCORE_PCT` (default **58**). Before scoring, each Second Layer survivor is enriched with its own website text.
 
 ### Hard Gates (applied before scoring)
 
@@ -279,12 +279,20 @@ Every run costs Anthropic API tokens (rough estimate: ~$0.50 for a typical verti
 |---|---|---|
 | `PIPELINE_MODEL` | `claude-opus-4-7` | Judgement calls (scoring, Second Layer, funding verify). `claude-sonnet-5` ≈ 2.5× cheaper. |
 | `PIPELINE_MODEL_EXTRACT` | `claude-haiku-4-5` | Scrape name-extraction (mechanical). Already the cheap model. |
-| `RESEARCH_MAX_QUERIES` | `12` | Cap on Claude research calls/run (V21 defines ~24 — the rest are skipped unless you raise this). |
+| `RESEARCH_MAX_QUERIES` | `12` | Cap on Claude research calls/run (V21 defines ~24 — the rest are skipped unless you raise this). Set `4` for V21 — the research queries overlap heavily. |
+| `MIN_SCORE_PCT` | `58` | Weighted score to write a candidate. Lowered from 65 to surface the 58–64 "early signal" band for review. |
 | `SCRAPE_LAYER` | `1` | `0` disables the whole scrape layer. |
-| `EXTRA_SOURCES` | `1` | `0` disables YC Launch HN / Product Hunt / VC newsletters (all free APIs, but they add candidates → more scoring calls). |
 | `SCRAPE_HEADLESS` | `1` | `0` skips the Chromium fallback (also cuts ~1–2 min of CI per run). |
+| `SCRAPE_RETRY_DAYS` | `60` | A scrape company that keeps soft-failing is retried each run until it's this old, then dropped. |
+| `EXTRA_SOURCES` | `1` | `0` disables YC Launch HN / Product Hunt / VC newsletters (free APIs, but add candidates → more scoring calls). |
 
 Scoring and Second Layer evaluation stay on the capable model regardless — candidate quality is not traded for cost there.
+
+**Scrape page cache** — an unchanged portfolio page reuses its last extraction instead of calling Claude again (`Scrape Cache` sheet tab, keyed by page-content hash). A "nothing new" run is nearly free.
+
+**Pre-scoring enrichment** — before the 9-factor score, each Second Layer survivor's own website (`/`, `/about`, `/product`, `/solutions`) is fetched and fed to the scorer, so it judges on real material rather than a one-line blurb.
+
+**Scrape retry** — the `Scrape Seen` tab now carries a `Status`. A company is marked `done` (never re-surfaced) only when it's **written to the sheet** or **hard-rejected** (over the funding cap, too old). One that just scored 55–63% stays `pending` and is re-tried on the next run of that vertical.
 
 ## On-Demand Pipeline (any industry)
 

@@ -26,7 +26,12 @@ from google.oauth2.service_account import Credentials
 # `${{ vars.X }}` as an empty string, and get(key, default) returns "" for
 # key-exists-but-empty. `or` falls back for both missing and empty.
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID") or "102k3pj7JjEhSXWgyBS144mgHd93MZywoWVyjWIonX50"
-MIN_SCORE_PCT = 65
+# Minimum weighted score to write a candidate to the sheet. Lowered from 65 to
+# surface the 58-64 "early signal" band for review; raise via MIN_SCORE_PCT.
+try:
+    MIN_SCORE_PCT = int(os.environ.get("MIN_SCORE_PCT") or "58")
+except ValueError:
+    MIN_SCORE_PCT = 58
 
 # Anthropic model for judgement-heavy calls — scoring, Second Layer eval, funding
 # verification, vertical synthesis. Keep this capable. Override with PIPELINE_MODEL.
@@ -426,6 +431,8 @@ def score_candidate(ai_client: Anthropic, candidate: dict, sl_reason: str):
         raised_line = (f"not publicly disclosed (early-stage; sourced via "
                        f"{candidate.get('_source', 'the pipeline')})")
     founded = candidate.get("founded_date") or candidate.get("founded_year") or "unknown"
+    site_text = str(candidate.get("_site_text", "")).strip()
+    site_block = f"\n\nFrom the company's own website:\n{site_text}\n" if site_text else ""
     prompt = f"""Score this seed-stage company on 9 factors (1-10 each).
 
 Company: {candidate.get("name")}
@@ -435,10 +442,11 @@ Total raised: {raised_line}
 Headcount: {candidate.get("headcount", "unknown")}
 Founded: {founded}
 HQ: {candidate.get("hq_city", "")}, {candidate.get("hq_country", "")}
-Second Layer assessment: {sl_reason}
+Second Layer assessment: {sl_reason}{site_block}
 
 If information for a factor is genuinely unavailable, score it 5 and note the gap
-in RISKS — do not invent specifics.
+in RISKS — do not invent specifics. Use the website text above for traction
+(named customers/pilots), product depth, and team signals when present.
 
 Score 1-10 (10=exceptional, 5=average, 1=weak):
 1A. Founder-Market Fit
@@ -519,15 +527,15 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
 
 
 def decision_from_score(pct: float) -> str:
-    if pct >= 85:
+    if pct >= 82:
         return "★★★★★ STRONG YES"
-    if pct >= 75:
+    if pct >= 72:
         return "★★★★ YES"
-    if pct >= 65:
+    if pct >= 64:
         return "★★★ DEEP DIVE"
     if pct >= 55:
-        return "★★ PROBABLY PASS"
-    return "★ HARD PASS"
+        return "★★ WATCH — early signal"
+    return "★ PASS"
 
 
 # ---------- Sheet writers ----------

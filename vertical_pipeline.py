@@ -41,7 +41,8 @@ import sys
 import json
 import re
 import time
-from datetime import datetime, timezone
+import hashlib
+from datetime import datetime, timezone, timedelta
 import requests
 import feedparser
 from pipeline_utils import (
@@ -57,7 +58,7 @@ from vertical_sources import (
     get_scrape_targets, passes_scrape_filter,
 )
 from new_sources import source_yc_launches, source_producthunt, VC_NEWSLETTER_FEEDS
-from contact_enrich import enrich_contact, scan_site_for_funding
+from contact_enrich import enrich_contact, scan_site_for_funding, fetch_company_context
 
 VERTICAL_TAB = "Vertical Pipeline"
 # On-demand runs (INDUSTRY_QUERY set) write here instead, to keep the curated
@@ -79,6 +80,12 @@ try:
     SCRAPE_MAX_NEW = int(os.environ.get("SCRAPE_MAX_NEW") or os.environ.get("V21_SCRAPE_MAX_NEW") or "50")
 except ValueError:
     SCRAPE_MAX_NEW = 50
+# A scrape company that never resolves (keeps scoring in the 40-57% band) is
+# retried each run until it's this many days old, then given up on.
+try:
+    SCRAPE_RETRY_DAYS = int(os.environ.get("SCRAPE_RETRY_DAYS") or "60")
+except ValueError:
+    SCRAPE_RETRY_DAYS = 60
 
 # Claude research fan-out cap (each search term = one Claude call).
 try:
@@ -409,6 +416,20 @@ is real, skip it entirely. Return ONLY JSON lines, nothing else."""
                     continue
                 try:
                     c = json.loads(line)
+                    nm = str(c.get("name", "")).strip()
+                    # Claude annotates some lines ("... - skipping", "not seed")
+                    # or invents thin one-word names — drop those here.
+                    if (not _plausible_company_name(re.sub(r"\s*\(.*?\)\s*", "", nm))
+                            or any(w in nm.lower() for w in ("skip", "not seed", "n/a", "unknown", "example"))
+                            or len(nm) < 3):
+                        continue
+                    # Require a real-looking website — hallucinated companies
+                    # usually have a blank or non-domain "website".
+                    site = str(c.get("website", "") or "").strip()
+                    if not re.match(r"^(https?://)?[a-z0-9-]+\.[a-z]{2,}", site, re.I):
+                        continue
+                    c["website"] = site if site.startswith("http") else "https://" + site
+                    c["name"] = re.sub(r"\s*\(.*?\)\s*$", "", nm)[:80]
                     # Force funding to null/0 so the verification pass MUST populate it.
                     # Never trust a funding figure that came from the sourcing prompt.
                     c["total_funding_usd"] = 0
@@ -676,37 +697,55 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
         return []
 
     print(f"[scrape] {len(targets)} targets")
-    seen = read_existing_names(sheet_client, SCRAPE_STATE_TAB)  # lowercased set
-    first_run = not seen
+    state = _load_scrape_state(sheet_client)
+    blocked = _scrape_blocked(state)  # 'done', or gave up after SCRAPE_RETRY_DAYS
+    cache = _load_scrape_cache(sheet_client)  # {url: (hash, [company dicts])}
+    first_run = not state
     if first_run:
         print("[scrape] no prior state — first run will record targets without flooding "
               f"the pipeline (cap {SCRAPE_MAX_NEW})")
 
-    new_hits = {}  # name_lower -> (name, website, note, source_url)
+    new_hits = {}  # norm_name -> (name, website, note, source_url, stage)
+    cache_updates = {}
+    cached_pages = 0
     for url in targets:
         page_text = _fetch_page_text(url)
         if not page_text or _looks_js_rendered(page_text) or _BLOCK_PAGE_RE.search(page_text[:600]):
             print(f"  [scrape] no usable content (JS shell / blocked / down), skipping: {url}")
             continue
-        for c in _extract_companies_from_page(ai_client, url, page_text, vertical):
-            key = c["name"].lower()
-            if key in seen or key in new_hits:
+        h = hashlib.md5(page_text.encode("utf-8", "ignore")).hexdigest()
+        if cache.get(url, (None,))[0] == h:
+            companies = cache[url][1]  # page unchanged — reuse last extraction, no Claude call
+            cached_pages += 1
+        else:
+            companies = _extract_companies_from_page(ai_client, url, page_text, vertical)
+            cache_updates[url] = (h, companies)
+        for c in companies:
+            key = _norm_company(c["name"])
+            if not key or key in blocked or key in new_hits:
                 continue
-            ok, reason = passes_scrape_filter(f"{c['name']} {c['note']}", vertical)
+            ok, reason = passes_scrape_filter(f"{c['name']} {c.get('note', '')}", vertical)
             if not ok:
                 print(f"  [scrape] filtered {c['name']}: {reason}")
                 continue
-            new_hits[key] = (c["name"], c["website"], c["note"], url, c.get("stage", ""))
+            new_hits[key] = (c["name"], c.get("website", ""), c.get("note", ""), url, c.get("stage", ""))
 
+    if cached_pages:
+        print(f"[scrape] {cached_pages} unchanged page(s) reused from cache (no extraction cost)")
+    _save_scrape_cache(sheet_client, cache_updates)
     print(f"[scrape] {len(new_hits)} new companies after dedup + filter")
 
     selected = list(new_hits.values())[:SCRAPE_MAX_NEW]
     if len(new_hits) > SCRAPE_MAX_NEW:
         print(f"[scrape] capping at {SCRAPE_MAX_NEW}; remaining will surface next run")
 
-    # Record every selected name as seen BEFORE gating/scoring, so a company that
-    # fails downstream isn't re-extracted every run. The seen tab is cheap to prune.
-    _record_scrape_seen(sheet_client, [(n, u, note) for (n, _w, note, u, _s) in selected])
+    # Record new names as 'pending'. Only companies that later get WRITTEN or
+    # HARD-rejected (over the funding cap / too old) become 'done' — a company
+    # that just scored 55% on thin data re-surfaces next run (main() resolves
+    # this after scoring; _scrape_blocked() also gives up after SCRAPE_RETRY_DAYS).
+    _record_scrape_seen(sheet_client, [
+        (n, u, note) for (n, _w, note, u, _s) in selected if _norm_company(n) not in state
+    ])
 
     out = []
     for (n, w, note, u, stage) in selected:
@@ -719,6 +758,7 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
             vertical["name"],
         )
         rec["_scrape_source_url"] = u
+        rec["_from_scrape"] = True
         if stage:  # portfolio pages often label the round — trust it over the default
             rec["last_funding_round"] = stage
         out.append(rec)
@@ -735,20 +775,111 @@ def _same_host(a: str, b: str) -> bool:
         return False
 
 
+_SCRAPE_STATE_HEADERS = ["Company", "First Seen", "Source URL", "Note", "Status"]
+_SCRAPE_CACHE_TAB = "Scrape Cache"
+
+
+def _load_scrape_cache(sheet_client) -> dict:
+    """{url: (content_hash, [company dict, …])} — lets an unchanged portfolio
+    page skip its Claude extraction call entirely."""
+    try:
+        tab = sheet_client.open_by_key(SHEET_ID).worksheet(_SCRAPE_CACHE_TAB)
+        rows = tab.get_all_records()
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        url = str(r.get("URL", "")).strip()
+        if not url:
+            continue
+        try:
+            companies = json.loads(r.get("Companies") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            companies = []
+        out[url] = (str(r.get("Hash", "")).strip(), companies)
+    return out
+
+
+def _save_scrape_cache(sheet_client, updates: dict) -> None:
+    """updates: {url: (hash, [company dicts])}. Rewrites the whole small tab."""
+    if not updates:
+        return
+    try:
+        tab = ensure_tab(sheet_client, _SCRAPE_CACHE_TAB,
+                         headers=["URL", "Hash", "Companies", "Updated"], rows=200, cols=4)
+        existing = {str(r.get("URL", "")).strip(): r for r in tab.get_all_records()}
+        for url, (h, companies) in updates.items():
+            existing[url] = {"URL": url, "Hash": h,
+                             "Companies": json.dumps(companies)[:45000],
+                             "Updated": datetime.now(timezone.utc).strftime("%Y-%m-%d")}
+        tab.clear()
+        tab.append_row(["URL", "Hash", "Companies", "Updated"])
+        tab.append_rows([[r["URL"], r["Hash"], r["Companies"], r["Updated"]] for r in existing.values()])
+    except Exception as e:
+        print(f"[scrape] could not update '{_SCRAPE_CACHE_TAB}': {e}")
+
+
+def _load_scrape_state(sheet_client) -> dict:
+    """{norm_name: {status, first_seen, row}} from the Scrape Seen tab."""
+    try:
+        tab = sheet_client.open_by_key(SHEET_ID).worksheet(SCRAPE_STATE_TAB)
+        rows = tab.get_all_records()
+    except Exception:
+        return {}
+    out = {}
+    for i, r in enumerate(rows, start=2):  # row 1 is the header
+        nm = str(r.get("Company", "")).strip()
+        if nm:
+            out[_norm_company(nm)] = {
+                "status": str(r.get("Status", "") or "pending").strip().lower(),
+                "first_seen": str(r.get("First Seen", "") or ""),
+                "row": i,
+            }
+    return out
+
+
+def _scrape_blocked(state: dict) -> set:
+    """Names to skip: resolved ('done'), or 'pending' past the retry window."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=SCRAPE_RETRY_DAYS)).strftime("%Y-%m-%d")
+    blocked = set()
+    for norm, s in state.items():
+        if s["status"] == "done" or (s["first_seen"] and s["first_seen"] < cutoff):
+            blocked.add(norm)
+    return blocked
+
+
 def _record_scrape_seen(sheet_client, rows: list) -> None:
-    """Append (name, source_url, note) rows to the Scrape Seen tab."""
+    """Append new (name, source_url, note) rows with Status='pending'."""
     if not rows:
         return
     try:
-        tab = ensure_tab(
-            sheet_client, SCRAPE_STATE_TAB,
-            headers=["Company", "First Seen", "Source URL", "Note"], rows=5000, cols=4,
-        )
+        tab = ensure_tab(sheet_client, SCRAPE_STATE_TAB,
+                         headers=_SCRAPE_STATE_HEADERS, rows=5000, cols=5)
+        # migrate a pre-Status tab so appended 5-col rows are readable
+        if (tab.row_values(1) or [])[:5] != _SCRAPE_STATE_HEADERS:
+            tab.update("A1:E1", [_SCRAPE_STATE_HEADERS])
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        tab.append_rows([[n, now, u, note] for (n, u, note) in rows])
-        print(f"[scrape] recorded {len(rows)} names to '{SCRAPE_STATE_TAB}'")
+        tab.append_rows([[n, now, u, note, "pending"] for (n, u, note) in rows])
+        print(f"[scrape] recorded {len(rows)} new names to '{SCRAPE_STATE_TAB}'")
     except Exception as e:
         print(f"[scrape] could not update '{SCRAPE_STATE_TAB}': {e}")
+
+
+def _resolve_scrape_seen(sheet_client, state: dict, done_norms: set) -> None:
+    """Mark rows 'done' for scrape companies that reached a terminal outcome
+    (written to the sheet, or hard-rejected). Everything else stays 'pending'."""
+    updates = [
+        {"range": f"E{state[n]['row']}", "values": [["done"]]}
+        for n in done_norms
+        if n in state and state[n]["status"] != "done"
+    ]
+    if not updates:
+        return
+    try:
+        sheet_client.open_by_key(SHEET_ID).worksheet(SCRAPE_STATE_TAB).batch_update(updates)
+        print(f"[scrape] resolved {len(updates)} names to 'done' in '{SCRAPE_STATE_TAB}'")
+    except Exception as e:
+        print(f"[scrape] could not resolve '{SCRAPE_STATE_TAB}': {e}")
 
 
 # ============================================================================
@@ -863,8 +994,12 @@ def _sec_form_d_lookup(company_name: str, max_filings: int = 6) -> dict:
     if not matched:
         return {}
 
-    # newest filing first
+    # newest filing first; a company whose most recent Form D is >5 years old is
+    # defunct or a wrong name match ("Conductor" -> a 2009 filing).
     matched.sort(key=lambda t: t[2] or "", reverse=True)
+    newest = matched[0][2] or ""
+    if newest and newest < (datetime.now() - timedelta(days=5 * 365)).strftime("%Y-%m-%d"):
+        return {}
     for _id, cik, fdate, display in matched[:max_filings]:
         if not cik or ":" not in _id:
             continue
@@ -1303,7 +1438,13 @@ def main():
     # Step 3: Three hard gates
     print(f"\nSTEP 2: Three hard gates")
     print("-" * 60)
-    passed = [c for c in candidates if passes_all_gates(c)[0]]
+    passed, scrape_done = [], set()  # scrape_done: names not worth retrying
+    for c in candidates:
+        ok, reason = passes_all_gates(c)
+        if ok:
+            passed.append(c)
+        elif c.get("_from_scrape") and ("exceeds" in reason or "years old" in reason or "Series A" in reason):
+            scrape_done.add(_norm_company(c.get("name", "")))  # over cap / too old — won't change
     print(f"Passed gates: {len(passed)} / {len(candidates)}")
 
     # Step 3b: Post-enrichment SIZE re-verification.
@@ -1320,6 +1461,8 @@ def main():
         c["_size_status"] = status
         if status == "REJECT":
             print(f"  REMOVED: {c.get('name', '?')} — {reason}")
+            if c.get("_from_scrape"):
+                scrape_done.add(_norm_company(c.get("name", "")))
             continue
         if status in ("ABOVE_RANGE", "UNVERIFIED"):
             print(f"  FLAG ({status}): {c.get('name', '?')} — {reason}")
@@ -1355,31 +1498,34 @@ def main():
             passed_sl.append(c)
     print(f"Passed Second Layer: {len(passed_sl)}")
 
+    # Step 3b: Enrich the Second Layer survivors with their own website text
+    # before scoring — a one-line blurb can't clear the threshold.
+    if passed_sl:
+        print("\nSTEP 3b: Fetching website context for scoring")
+        print("-" * 60)
+        for c in passed_sl:
+            site = c.get("website") or ""
+            c["_site_text"] = fetch_company_context(site) if site else ""
+            print(f"  {c.get('name', '?'):30s} {len(c['_site_text'])} chars from site")
+
     # Step 5: 9-factor scoring
     print(f"\nSTEP 4: 9-factor scoring")
     print("-" * 60)
-    scored = []
+    scored, below = [], []
     for c in passed_sl:
         result = score_candidate(ai_client, c, c["_sl_reason"])
-        # MIN_SCORE_PCT may be a single number OR a dict of {stage: threshold}.
-        # Look up the threshold based on the candidate's stage in the dict case.
-        if isinstance(MIN_SCORE_PCT, dict):
-            stage = str(c.get("last_funding_round", "") or "unknown").lower().strip()
-            threshold = MIN_SCORE_PCT.get(stage, MIN_SCORE_PCT.get("unknown", 60))
-        else:
-            threshold = MIN_SCORE_PCT
-        if result["weighted_pct"] < threshold:
+        pct = result["weighted_pct"]
+        rec = {"candidate": c, "sl_reason": c["_sl_reason"], **result,
+               "decision": decision_from_score(pct)}
+        if pct < MIN_SCORE_PCT:
+            below.append(rec)
+            print(f"  {c['name']:33s} {pct:5.1f}%  (below {MIN_SCORE_PCT}) [{c.get('_source', '?')}]")
             continue
-        scored.append({
-            "candidate": c,
-            "sl_reason": c["_sl_reason"],
-            **result,
-            "decision": decision_from_score(result["weighted_pct"]),
-        })
-        print(f"  {c['name']:35s} {result['weighted_pct']:5.1f}% [{c.get('_source', '?')}]")
+        scored.append(rec)
+        print(f"  {c['name']:33s} {pct:5.1f}%  {rec['decision']} [{c.get('_source', '?')}]")
 
     scored.sort(key=lambda x: x["weighted_pct"], reverse=True)
-    print(f"\nScored above threshold: {len(scored)}")
+    print(f"\nScored above threshold ({MIN_SCORE_PCT}%): {len(scored)}  |  below: {len(below)}")
 
     # Step 5b: Contact enrichment for the top slice (website scrape only).
     if scored and ENRICH_CONTACTS:
@@ -1399,6 +1545,14 @@ def main():
     print(f"\nSTEP 5: Writing to '{target_tab}' tab")
     print("-" * 60)
     write_scored_candidates(sheet_client, target_tab, scored, vertical_label=name)
+
+    # Resolve scrape state: written or hard-rejected -> 'done'; the rest stay
+    # 'pending' and re-surface next run (until SCRAPE_RETRY_DAYS).
+    if SCRAPE_LAYER_ENABLED and get_scrape_targets(vertical):
+        for s in scored:
+            if s["candidate"].get("_from_scrape"):
+                scrape_done.add(_norm_company(s["candidate"].get("name", "")))
+        _resolve_scrape_seen(sheet_client, _load_scrape_state(sheet_client), scrape_done)
 
     # Step 7: Email digest
     if scored:
