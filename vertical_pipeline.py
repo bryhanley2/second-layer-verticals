@@ -1,22 +1,36 @@
 """
-Second Layer Vertical Pipeline (Crustdata-free)
+Second Layer Vertical Pipeline
 ================================================
-Runs on-demand for a specific vertical (0-20). Combines five sources:
-  1. YC Companies   — filtered by vertical keywords (replaces Crustdata)
-  2. SEC Form D     — EDGAR filings keyword-matched per vertical
-  3. TechCrunch     — venture/startup feeds keyword-filtered
-  4. Vertical RSS   — sector publications parsed for seed funding announcements
+Runs on-demand for a specific vertical (0-20). Combines free sources:
+  1. YC Companies    — yc-oss dataset filtered by vertical keywords + recent batch
+  2. SEC Form D      — EDGAR filings keyword-matched per vertical
+  3. TechCrunch      — venture/startup feeds keyword-filtered
+  4. Vertical RSS    — sector publications parsed for seed funding announcements
   5. Claude Research — vertical-targeted research prompts
+  6. Extra sources   — YC Launch HN posts, Product Hunt, VC newsletters
+                       (new_sources.py; set EXTRA_SOURCES=0 to skip)
+  7. Scrape layer    — verticals with scrape_targets: HTML fetch (static +
+                       headless) + Claude extraction + run-over-run diff
+                       (set SCRAPE_LAYER=0 to skip)
+
+After scoring, the top DIGEST_TOP_N candidates get a website-only contact
+lookup (public email + LinkedIn; ENRICH_CONTACTS=0 to skip) and an outreach
+digest is emailed to EMAIL_RECIPIENT.
 
 All candidates pass through the three hard gates before scoring, then the
 Second Layer thesis filter, then 9-factor scoring. Writes to the
 "Vertical Pipeline" tab with the vertical name annotated.
 
 Usage:
-  VERTICAL_INDEX=0 python vertical_pipeline.py   # Energy
-  VERTICAL_INDEX=10 python vertical_pipeline.py  # Healthcare
-  VERTICAL_INDEX=20 python vertical_pipeline.py  # Consumer Health Brands
+  VERTICAL_INDEX=0 python vertical_pipeline.py       # Energy
+  VERTICAL_INDEX=10 python vertical_pipeline.py      # Healthcare
+  VERTICAL_INDEX=20 python vertical_pipeline.py      # Consumer Health Brands
   (no override) → rotates by day of year
+
+  INDUSTRY_QUERY="precision fermentation" python vertical_pipeline.py
+      → on-demand: Claude synthesizes a vertical (keywords / feeds / search
+        terms) from the free-text query, then runs the full pipeline for it and
+        writes to the "On-Demand Pipeline" tab. Overrides VERTICAL_INDEX.
 
 Required env vars:
   ANTHROPIC_API_KEY, GOOGLE_CREDENTIALS_JSON, GOOGLE_SHEET_ID
@@ -26,19 +40,53 @@ import os
 import sys
 import json
 import re
+import time
 from datetime import datetime, timezone
 import requests
 import feedparser
 from pipeline_utils import (
-    get_sheet_client, get_anthropic_client, SHEET_ID,
+    get_sheet_client, get_anthropic_client, SHEET_ID, MODEL,
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
-    verify_size_post_enrichment,
+    verify_size_post_enrichment, confirm_funding_report,
     decision_from_score, write_scored_candidates, read_existing_names,
-    send_email_digest, MIN_SCORE_PCT, safe_float,
+    send_email_digest, MIN_SCORE_PCT, safe_float, ensure_tab,
+    record_llm_error, llm_error_count, llm_error_summary,
 )
-from vertical_sources import get_vertical, get_vertical_by_day_of_year
+from vertical_sources import (
+    get_vertical, get_vertical_by_day_of_year, synthesize_vertical,
+    get_scrape_targets, passes_scrape_filter,
+)
+from new_sources import source_yc_launches, source_producthunt, VC_NEWSLETTER_FEEDS
+from contact_enrich import enrich_contact
 
 VERTICAL_TAB = "Vertical Pipeline"
+# On-demand runs (INDUSTRY_QUERY set) write here instead, to keep the curated
+# vertical data separate from ad-hoc industry requests.
+ON_DEMAND_TAB = "On-Demand Pipeline"
+
+# Extra early-signal sources (YC Launches, Product Hunt, VC newsletters) run in
+# STEP 1 unless EXTRA_SOURCES=0.
+EXTRA_SOURCES_ENABLED = os.environ.get("EXTRA_SOURCES", "1").strip() != "0"
+
+# Proprietary scrape layer (HTML targets + run-over-run diff). Runs for any
+# vertical that defines scrape_targets; a no-op for the rest. Set SCRAPE_LAYER=0
+# (legacy alias: V21_SCRAPE=0) to skip it entirely.
+SCRAPE_LAYER_ENABLED = (os.environ.get("SCRAPE_LAYER") or os.environ.get("V21_SCRAPE") or "1").strip() != "0"
+SCRAPE_STATE_TAB = "Scrape Seen"
+# Cap on how many never-before-seen companies one scrape run pushes into the
+# pipeline — protects the first run (empty state) from processing whole portfolios.
+try:
+    SCRAPE_MAX_NEW = int(os.environ.get("SCRAPE_MAX_NEW") or os.environ.get("V21_SCRAPE_MAX_NEW") or "50")
+except ValueError:
+    SCRAPE_MAX_NEW = 50
+
+# Outreach digest: scrape each top candidate's website for a public email
+# (ENRICH_CONTACTS=0 to skip) and send that many in the email digest.
+ENRICH_CONTACTS = os.environ.get("ENRICH_CONTACTS", "1").strip() != "0"
+try:
+    DIGEST_TOP_N = int(os.environ.get("DIGEST_TOP_N") or "10")
+except ValueError:
+    DIGEST_TOP_N = 10
 
 # Recent YC batches considered "early enough" for the stage gate.
 # Adjust as new batches are announced.
@@ -46,12 +94,12 @@ RECENT_YC_BATCHES = {"W23", "S23", "W24", "S24", "F24", "W25", "S25", "F25", "X2
 
 
 # ============================================================================
-# Source 1: YC Companies (replaces Crustdata)
+# Source 1: YC Companies
 # ============================================================================
 def source_vertical_yc(keywords: list, vertical_name: str) -> list:
     """
     Pull the full YC company dataset (yc-oss) and filter by vertical keywords.
-    This is the free, structured replacement for the Crustdata cache.
+    Free, structured, and refreshed by yc-oss on every YC batch.
     """
     candidates = []
     url = "https://yc-oss.github.io/api/companies/all.json"
@@ -144,6 +192,11 @@ def source_sec_form_d(keywords: list, vertical_name: str, days_back: int = 30) -
                 key = name.lower()
                 if not name or key in seen_names:
                     continue
+                # Form D is filed by funds, SPVs, DSTs and holding entities too —
+                # keyword search drags them in. Drop anything that isn't an
+                # operating company by name.
+                if _FUND_ENTITY_RE.search(name):
+                    continue
                 seen_names.add(key)
                 candidates.append({
                     "name": name,
@@ -168,6 +221,42 @@ def source_sec_form_d(keywords: list, vertical_name: str, days_back: int = 30) -
 # ============================================================================
 # Source 1c: TechCrunch funding coverage (cross-vertical, keyword-filtered)
 # ============================================================================
+_FUNDING_HEADLINE_RE = re.compile(
+    r"([A-Z][A-Za-z0-9.\-& ]{2,40})\s+(?:raises?|secures?|closes?|lands?|nabs?|bags?|gets|nets|banks|snags)\s+\$(\d+(?:\.\d+)?)\s*([MK])",
+    re.IGNORECASE,
+)
+_HEADLINE_VERB_RE = re.compile(
+    r"\b(wants|plans|aims|hopes|is |are |launches|unveils|debuts|introduces|to make|to help|"
+    r"that |which |how |why |after |amid |could |says |thinks|bets|pivots)\b",
+    re.I,
+)
+_NAME_ONLY_RAISE_RE = re.compile(
+    r"^([A-Z][A-Za-z0-9.\-& ]{1,40}?)\s+(?:raises?|secures?|closes?|lands?|nabs?|bags?|gets|nets|banks|snags)\b",
+)
+
+
+def _plausible_company_name(name: str) -> bool:
+    name = (name or "").strip()
+    if not name or _HEADLINE_VERB_RE.search(name):
+        return False
+    return 1 <= len(name.split()) <= 5
+
+
+def _company_from_funding_headline(title: str):
+    """(name, funding_usd) from a funding headline, or (None, 0) if the title
+    isn't 'Company raises $N' shaped — better to drop than emit a headline."""
+    m = _FUNDING_HEADLINE_RE.search(title)
+    if m:
+        name = m.group(1).strip()
+        usd = float(m.group(2)) * (1_000_000 if m.group(3).upper() == "M" else 1_000)
+        return (name[:80] if _plausible_company_name(name) else None), usd
+    m2 = _NAME_ONLY_RAISE_RE.match(title)
+    if m2:
+        name = m2.group(1).strip()
+        return (name[:80] if _plausible_company_name(name) else None), 0.0
+    return None, 0.0
+
+
 def source_techcrunch(keywords: list, vertical_name: str) -> list:
     """Parse TechCrunch venture/startup feeds for seed rounds matching the vertical."""
     candidates = []
@@ -176,10 +265,6 @@ def source_techcrunch(keywords: list, vertical_name: str) -> list:
         "https://techcrunch.com/category/startups/feed/",
         "https://techcrunch.com/tag/seed-funding/feed/",
     ]
-    funding_pattern = re.compile(
-        r"([A-Z][A-Za-z0-9.\- ]{2,40})\s+(?:raises?|secures?|closes?|lands?|nabs?|bags?)\s+\$(\d+(?:\.\d+)?)\s*([MK])",
-        re.IGNORECASE,
-    )
     kw_lower = [k.lower() for k in keywords]
     seed_keywords = ["seed", "pre-seed", "series a"]
 
@@ -195,17 +280,10 @@ def source_techcrunch(keywords: list, vertical_name: str) -> list:
                     continue
                 if not any(s in blob for s in seed_keywords):
                     continue
-                match = funding_pattern.search(title)
-                funding_usd = 0
-                name = title.split(" raises")[0].split(" secures")[0].split(" closes")[0].strip()[:80]
-                if match:
-                    name = match.group(1).strip()[:80]
-                    amount = float(match.group(2))
-                    unit = match.group(3).upper()
-                    funding_usd = amount * (1_000_000 if unit == "M" else 1_000)
-                    if funding_usd > 15_000_000:
-                        continue
+                name, funding_usd = _company_from_funding_headline(title)
                 if not name:
+                    continue
+                if funding_usd > 15_000_000:
                     continue
                 candidates.append({
                     "name": name,
@@ -233,10 +311,6 @@ def source_techcrunch(keywords: list, vertical_name: str) -> list:
 def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
     """Parse vertical-specific publications for seed-stage funding announcements."""
     candidates = []
-    funding_pattern = re.compile(
-        r"([A-Z][A-Za-z0-9.\- ]{2,40})\s+(?:raises?|secures?|closes?|announces?|bags?)\s+\$(\d+(?:\.\d+)?)\s*([MK])",
-        re.IGNORECASE,
-    )
     seed_keywords = ["seed", "pre-seed", "series a", "$1m", "$2m", "$3m", "$5m", "$10m", "$15m"]
 
     for feed_url in rss_urls:
@@ -248,31 +322,11 @@ def source_vertical_rss(rss_urls: list, vertical_name: str) -> list:
                 combined = f"{title} {summary}".lower()
                 if not any(k in combined for k in seed_keywords):
                     continue
-                match = funding_pattern.search(title)
-                if not match:
-                    if not any(k in title.lower() for k in ["seed", "pre-seed"]):
-                        continue
-                    name_fallback = title.split(" raises")[0].split(" secures")[0].split(" closes")[0].strip()[:80]
-                    if not name_fallback:
-                        continue
-                    candidates.append({
-                        "name": name_fallback,
-                        "website": entry.get("link", ""),
-                        "description": summary[:500],
-                        "industry": vertical_name,
-                        "hq_city": "", "hq_country": "United States",
-                        "founded_date": "", "headcount": 0,
-                        "total_funding_usd": 0, "last_funding_round": "seed",
-                        "last_funding_date": entry.get("published", ""),
-                        "linkedin_url": "",
-                        "_source": f"RSS ({feed_url.split('/')[2]})",
-                    })
+                # Only keep items where a real "Company raises $N" name can be
+                # pulled from the title — otherwise it's a trend/analysis headline.
+                name, funding_usd = _company_from_funding_headline(title)
+                if not name:
                     continue
-
-                name = match.group(1).strip()
-                amount = float(match.group(2))
-                unit = match.group(3).upper()
-                funding_usd = amount * (1_000_000 if unit == "M" else 1_000)
                 if funding_usd > 15_000_000:
                     continue
 
@@ -328,7 +382,7 @@ Do NOT include placeholder or made-up companies. If uncertain about whether a co
 is real, skip it entirely. Return ONLY JSON lines, nothing else."""
         try:
             response = ai_client.messages.create(
-                model="claude-opus-4-7",
+                model=MODEL,
                 max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -353,9 +407,307 @@ is real, skip it entirely. Return ONLY JSON lines, nothing else."""
                 except json.JSONDecodeError:
                     continue
         except Exception as e:
-            print(f"[Claude V-Research '{term}'] Error: {e}")
+            record_llm_error(f"vertical research query '{term}'", e)
     print(f"[Claude Vertical Research] {len(candidates)} candidates")
     return candidates
+
+
+# ============================================================================
+# Source 6: extra early-signal sources (new_sources.py)
+# ============================================================================
+def _adapt_extra_record(raw: dict, vertical_name: str) -> dict:
+    """Map a new_sources.py record onto the full candidate shape.
+
+    Funding is left at 0 / unverified — identical to how YC, SEC and Claude
+    Research candidates enter the pipeline; the Step 1b verification pass and the
+    post-enrichment size re-check populate and validate the real figure.
+    """
+    return {
+        "name": str(raw.get("name", "")).strip()[:80],
+        "website": raw.get("url", ""),
+        "description": str(raw.get("description", ""))[:500],
+        "industry": vertical_name,
+        "hq_city": "",
+        "hq_country": "United States",
+        "founded_date": "",
+        "headcount": 0,
+        "total_funding_usd": 0,
+        "_funding_unverified": True,
+        "last_funding_round": "seed",
+        "last_funding_date": "",
+        "linkedin_url": "",
+        "yc_batch": raw.get("yc_batch", ""),
+        "_source": raw.get("source", "extra source"),
+    }
+
+
+def source_extra(vertical: dict) -> list:
+    """YC Launches + Product Hunt + VC newsletters, adapted to candidate shape.
+
+    - YC Launch records are dropped if their batch is older than RECENT_YC_BATCHES
+      (same recency bar the main YC source applies).
+    - VC newsletter feeds are run through source_vertical_rss(), which already
+      does "<Company> raises $<N>" headline extraction + seed-stage filtering.
+    """
+    name = vertical["name"]
+    out = []
+
+    yc = [_adapt_extra_record(r, name) for r in source_yc_launches(vertical)]
+    yc = [c for c in yc if not c["yc_batch"] or c["yc_batch"] in RECENT_YC_BATCHES]
+    print(f"[YC Launches] {len(yc)} candidates")
+
+    ph = [_adapt_extra_record(r, name) for r in source_producthunt(vertical)]
+    print(f"[Product Hunt] {len(ph)} candidates")
+
+    nl = source_vertical_rss(VC_NEWSLETTER_FEEDS, name)
+    print(f"[VC Newsletters] {len(nl)} candidates")
+
+    out.extend(yc)
+    out.extend(ph)
+    out.extend(nl)
+    return out
+
+
+# ============================================================================
+# Source 7: proprietary scrape layer
+# ============================================================================
+# The sources above are press-and-announcement based — every fund scraping YC
+# and TechCrunch sees the same companies. A vertical's scrape_targets
+# (specialist-fund portfolios, accelerator cohorts, program awardee lists,
+# market registries) surface companies BEFORE they hit venture press.
+#
+# Flow: fetch each target's HTML -> reduce to visible text + link list ->
+# Claude extracts company names -> passes_scrape_filter() drops rejects ->
+# diff against the "Scrape Seen" tab so only NEW names enter the pipeline.
+#
+# Fetch is static (requests) first; a page that comes back as a JS shell is
+# re-fetched with headless Chromium (Playwright) when available. Set
+# SCRAPE_HEADLESS=0 to force static-only.
+
+_SCRAPE_UA = "Mozilla/5.0 (compatible; SecondLayerVC-research/1.0; +https://bryanhanleyvc.substack.com)"
+SCRAPE_HEADLESS = (os.environ.get("SCRAPE_HEADLESS") or os.environ.get("V21_SCRAPE_HEADLESS") or "1").strip() != "0"
+_HEADLESS_STATE = None  # None = untried, True = works, False = unavailable
+
+# Drop non-content blocks (incl. their contents) before extracting text.
+# Deliberately conservative — stripping <nav>/<header>/<footer> ate real content
+# on sites that nest their listings inside those tags. The extraction prompt is
+# told to skip nav/generic text instead.
+_TAG_RE = re.compile(r"(?is)<(script|style|noscript|svg|template)\b.*?</\1>")
+_ANCHOR_RE = re.compile(r'(?is)<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>')
+_STRIP_RE = re.compile(r"(?s)<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def _html_to_text(html: str) -> str:
+    """Reduce raw HTML to visible text + an anchor-text/href list (portfolio
+    pages are mostly links), capped for an LLM prompt."""
+    html = _TAG_RE.sub(" ", html or "")
+    link_lines = []
+    for href, inner in _ANCHOR_RE.findall(html):
+        t = _WS_RE.sub(" ", _STRIP_RE.sub(" ", inner)).strip()
+        if 2 <= len(t) <= 60 and not href.startswith(("#", "mailto:", "javascript:")):
+            link_lines.append(f"{t} -> {href}")
+    body = _WS_RE.sub(" ", _STRIP_RE.sub(" ", html)).strip()
+    combined = body[:5000]
+    if link_lines:
+        combined += "\n\nLINKS ON PAGE:\n" + "\n".join(link_lines[:150])
+    return combined[:9000]
+
+
+def _static_fetch(url: str, timeout: int) -> str:
+    try:
+        resp = requests.get(url, headers={"User-Agent": _SCRAPE_UA}, timeout=timeout)
+        resp.raise_for_status()
+        return resp.text
+    except Exception as e:
+        print(f"  [scrape] static fetch failed: {url} — {e}")
+        return ""
+
+
+def _render_fetch(url: str, nav_timeout_ms: int = 25000) -> str:
+    """Render a JS page with headless Chromium (Playwright). Returns raw HTML,
+    or '' if Playwright isn't installed or rendering fails. Scrolls to trigger
+    lazy-loaded portfolio grids."""
+    global _HEADLESS_STATE
+    if _HEADLESS_STATE is False:
+        return ""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        _HEADLESS_STATE = False
+        print("  [scrape] playwright not installed — headless fetch disabled for this run")
+        return ""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            page = browser.new_page(user_agent=_SCRAPE_UA)
+            page.set_default_timeout(nav_timeout_ms)
+            page.goto(url, wait_until="load")
+            for _ in range(4):  # nudge lazy-loaded grids
+                page.mouse.wheel(0, 4000)
+                page.wait_for_timeout(700)
+            page.wait_for_timeout(1200)
+            html = page.content()
+            browser.close()
+        _HEADLESS_STATE = True
+        return html
+    except Exception as e:
+        print(f"  [scrape] headless render failed: {url} — {e}")
+        return ""
+
+
+def _fetch_page_text(url: str, timeout: int = 20) -> str:
+    """Static fetch first; fall back to headless render when the static result
+    is a JS shell (and Playwright is available)."""
+    raw = _static_fetch(url, timeout)
+    text = _html_to_text(raw) if raw else ""
+    if text and not _looks_js_rendered(text):
+        return text
+    if SCRAPE_HEADLESS:
+        rendered = _render_fetch(url)
+        if rendered:
+            rendered_text = _html_to_text(rendered)
+            if len(rendered_text.strip()) > len(text.strip()):
+                print(f"  [scrape] headless render used: {url} ({len(rendered_text)} chars)")
+                return rendered_text
+    return text
+
+
+_BLOCK_PAGE_RE = re.compile(
+    r"(you have been blocked|access denied|ssl handshake failed|attention required|"
+    r"enable javascript and cookies|checking your browser|request could not be satisfied|"
+    r"this domain (is|may be) for sale|domain for sale)",
+    re.I,
+)
+
+
+def _looks_js_rendered(page_text: str) -> bool:
+    """A JS SPA that hasn't hydrated yields an almost-empty shell."""
+    return len(page_text.strip()) < 250
+
+
+def _extract_companies_from_page(ai_client, url: str, page_text: str, vertical: dict) -> list:
+    """Ask Claude to pull operating-company names out of one scraped page.
+    Returns list of {name, website, note}. [] on error or empty page."""
+    if len(page_text.strip()) < 250:
+        return []
+    thesis = vertical.get("second_layer_logic", "")
+    kw = ", ".join((vertical.get("keywords") or [])[:12])
+    prompt = f"""Text scraped from: {url}
+
+This page is expected to list startups / companies — a VC portfolio, an
+accelerator cohort, a government program's awardee or teaming list, or a
+market-participant registry.
+
+Extract every entry that is an operating company/startup in or adjacent to
+this vertical: "{vertical['name']}".{(' Context: ' + thesis) if thesis else ''}
+Relevant terms: {kw}
+
+STRICT RULES:
+- Real company names only. Skip nav items, section headers, people's names,
+  fund/investor names, report titles, and generic phrases ("Our Portfolio",
+  "Learn more", "Read the case study").
+- Use ONLY names present in the text below. Do not infer or invent companies.
+- If the page lists no companies, return nothing at all.
+
+Return ONE JSON object per line and nothing else:
+{{"name": "...", "website": "https://... or empty", "note": "<=12 words on what they do, or empty"}}
+
+--- PAGE TEXT ---
+{page_text}"""
+    try:
+        resp = ai_client.messages.create(
+            model=MODEL, max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text.strip()
+    except Exception as e:
+        record_llm_error(f"scrape extraction {url}", e)
+        return []
+
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            c = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        nm = str(c.get("name", "")).strip()
+        if nm:
+            out.append({
+                "name": nm[:80],
+                "website": str(c.get("website", "") or "").strip()[:300],
+                "note": str(c.get("note", "") or "").strip()[:200],
+            })
+    return out
+
+
+def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
+    """Proprietary scrape layer. Returns candidate-shaped dicts for companies
+    found on this vertical's scrape_targets that were NOT seen in a prior run.
+    No-op (returns []) for any vertical without scrape_targets."""
+    targets = get_scrape_targets(vertical)
+    if not targets:
+        return []
+
+    print(f"[scrape] {len(targets)} targets")
+    seen = read_existing_names(sheet_client, SCRAPE_STATE_TAB)  # lowercased set
+    first_run = not seen
+    if first_run:
+        print("[scrape] no prior state — first run will record targets without flooding "
+              f"the pipeline (cap {SCRAPE_MAX_NEW})")
+
+    new_hits = {}  # name_lower -> (name, website, note, source_url)
+    for url in targets:
+        page_text = _fetch_page_text(url)
+        if not page_text or _looks_js_rendered(page_text) or _BLOCK_PAGE_RE.search(page_text[:600]):
+            print(f"  [scrape] no usable content (JS shell / blocked / down), skipping: {url}")
+            continue
+        for c in _extract_companies_from_page(ai_client, url, page_text, vertical):
+            key = c["name"].lower()
+            if key in seen or key in new_hits:
+                continue
+            ok, reason = passes_scrape_filter(f"{c['name']} {c['note']}", vertical)
+            if not ok:
+                print(f"  [scrape] filtered {c['name']}: {reason}")
+                continue
+            new_hits[key] = (c["name"], c["website"], c["note"], url)
+
+    print(f"[scrape] {len(new_hits)} new companies after dedup + filter")
+
+    selected = list(new_hits.values())[:SCRAPE_MAX_NEW]
+    if len(new_hits) > SCRAPE_MAX_NEW:
+        print(f"[scrape] capping at {SCRAPE_MAX_NEW}; remaining will surface next run")
+
+    # Record every selected name as seen BEFORE gating/scoring, so a company that
+    # fails downstream isn't re-extracted every run. The seen tab is cheap to prune.
+    _record_scrape_seen(sheet_client, [(n, u, note) for (n, _w, note, u) in selected])
+
+    return [
+        _adapt_extra_record(
+            {"name": n, "url": w or u, "description": note, "source": "V21 Scrape"},
+            vertical["name"],
+        )
+        for (n, w, note, u) in selected
+    ]
+
+
+def _record_scrape_seen(sheet_client, rows: list) -> None:
+    """Append (name, source_url, note) rows to the Scrape Seen tab."""
+    if not rows:
+        return
+    try:
+        tab = ensure_tab(
+            sheet_client, SCRAPE_STATE_TAB,
+            headers=["Company", "First Seen", "Source URL", "Note"], rows=5000, cols=4,
+        )
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tab.append_rows([[n, now, u, note] for (n, u, note) in rows])
+        print(f"[scrape] recorded {len(rows)} names to '{SCRAPE_STATE_TAB}'")
+    except Exception as e:
+        print(f"[scrape] could not update '{SCRAPE_STATE_TAB}': {e}")
 
 
 # ============================================================================
@@ -401,26 +753,124 @@ def _crunchbase_lookup(company_name: str) -> dict:
         return {}
 
 
+# --- SEC EDGAR Form D funding lookup (free, no key, strict name match) --------
+_SEC_UA = {"User-Agent": "SecondLayerVC research bryanhanleyvc@gmail.com"}
+_LEGAL_SUFFIX_RE = re.compile(
+    r"[\s,.]+(inc|incorporated|llc|l\.l\.c|corp|corporation|co|ltd|limited|lp|l\.p|plc|holdings)\.?$",
+    re.I,
+)
+# Names that mean "investment vehicle / holding entity", not "operating startup".
+# Filters both the SEC Form D source and the funding-verification lookup.
+_FUND_ENTITY_RE = re.compile(
+    r"\b(spv|fund|feeder|sicav|reit|dst|s\.?c\.?sp|investments?|activist|ventures?|"
+    r"partners|capital|holdings|trust|advis[eo]rs?|management|co[- ]?invest(?:ment)?s?|"
+    r"offshore|series)\b|\bl\.?\s?p\.?\b",
+    re.I,
+)
+
+
+def _norm_company(name: str) -> str:
+    n = (name or "").lower().strip()
+    n = re.sub(r"\(cik.*?\)", "", n)
+    prev = None
+    while prev != n:  # strip stacked suffixes ("Foo Co, Inc.")
+        prev = n
+        n = _LEGAL_SUFFIX_RE.sub("", n).strip()
+    return re.sub(r"[^a-z0-9 ]", "", n).strip()
+
+
+def _sec_form_d_lookup(company_name: str, max_filings: int = 5) -> dict:
+    """Look up a company's own Form D filings on EDGAR and sum totalAmountSold.
+
+    STRICT name match only (normalized exact, or exact prefix for multi-word
+    names) and fund/SPV entities are rejected — a wrong figure is worse than
+    none. Returns {} on no confident match, or a dict with total_funding_usd,
+    last_funding_date, source_url, entity_name, n_filings.
+    """
+    q = _norm_company(company_name)
+    if len(q) < 4:
+        return {}
+    try:
+        r = requests.get(
+            "https://efts.sec.gov/LATEST/search-index",
+            params={"q": f'"{company_name}"', "forms": "D"},
+            headers=_SEC_UA, timeout=20,
+        )
+        hits = r.json().get("hits", {}).get("hits", []) if r.status_code == 200 else []
+    except Exception:
+        return {}
+
+    matched = []
+    for h in hits:
+        src = h.get("_source", {})
+        display = (src.get("display_names") or [""])[0]
+        if _FUND_ENTITY_RE.search(display):
+            continue
+        norm = _norm_company(display)
+        if norm == q or (len(q.split()) >= 2 and norm.startswith(q + " ")):
+            matched.append((h.get("_id", ""), (src.get("ciks") or [""])[0], src.get("file_date", ""), display))
+    if not matched:
+        return {}
+
+    total, dates = 0.0, []
+    for _id, cik, fdate, _display in matched[:max_filings]:
+        if not cik or ":" not in _id:
+            continue
+        acc = _id.split(":")[0].replace("-", "")
+        try:
+            xml = requests.get(
+                f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}/primary_doc.xml",
+                headers=_SEC_UA, timeout=20,
+            ).text
+        except Exception:
+            continue
+        m = re.search(r"<totalAmountSold>(\d+)</totalAmountSold>", xml)
+        if m:
+            total += float(m.group(1))
+        if fdate:
+            dates.append(fdate)
+        time.sleep(0.2)  # SEC politeness
+
+    if total <= 0:
+        return {}
+    cik0 = int(matched[0][1])
+    return {
+        "total_funding_usd": int(total),
+        "last_funding_date": max(dates) if dates else "",
+        "source_url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik0:010d}&type=D",
+        "entity_name": re.sub(r"\s*\(CIK.*?\)", "", matched[0][3]).strip(),
+        "n_filings": len(matched),
+    }
+
+
 def verify_zero_funding(ai_client, candidates: list) -> None:
     """
-    Two-pass funding verification:
-      1. For each candidate showing $0, try Crunchbase API (if key configured).
-      2. For remaining unverified candidates, ask Claude — but Claude must cite
-         a source or return "unverified". No estimation, no extrapolation.
+    Multi-pass funding verification for $0 candidates. Never guesses — a figure
+    is set only when a source can be named.
 
-    Populates: total_funding_usd, last_funding_round (the round name like "Series A"),
-    last_round_type (explicit round label for the new sheet column),
-    last_funding_date, founded_year, _funding_confidence, _funding_source.
+      1.  Crunchbase API (only if CRUNCHBASE_API_KEY is set)
+      1b. SEC EDGAR Form D — the company's own filings, strict name match
+      2.  Claude, with a hard source-citation requirement
+
+    Every candidate that starts at $0 gets a `_funding_checks` list recording
+    what each pass found ("crunchbase: no key", "sec form d: $2.1M (2024-03-01)",
+    "claude: no citable source"). Sets total_funding_usd, last_funding_round,
+    last_funding_date, founded_year, _funding_confidence, _funding_source (a
+    URL/citation when verified, else the joined checks), _funding_unverified.
     """
     zero = [c for c in candidates if safe_float(c.get("total_funding_usd", 0)) == 0]
     if not zero:
         return
+    for c in zero:
+        c.setdefault("_funding_checks", [])
+
+    have_cb_key = bool(os.environ.get("CRUNCHBASE_API_KEY"))
 
     # ----- Pass 1: Crunchbase lookup -----
     crunchbase_hits = 0
     still_unknown = []
     for c in zero:
-        cb_data = _crunchbase_lookup(c["name"])
+        cb_data = _crunchbase_lookup(c["name"]) if have_cb_key else {}
         if cb_data and cb_data.get("total_funding_usd"):
             c["total_funding_usd"] = cb_data["total_funding_usd"]
             c["last_funding_round"] = cb_data.get("last_funding_type") or c.get("last_funding_round", "")
@@ -428,19 +878,47 @@ def verify_zero_funding(ai_client, candidates: list) -> None:
             c["last_funding_date"] = cb_data.get("last_funding_date") or c.get("last_funding_date", "")
             c["founded_year"] = cb_data.get("founded_year") or c.get("founded_year", "")
             c["_funding_confidence"] = "high"
-            c["_funding_source"] = "Crunchbase"
-            c["_funding_unverified"] = False  # cleared: now verified against Crunchbase
+            c["_funding_source"] = "https://www.crunchbase.com/ (Crunchbase API)"
+            c["_funding_unverified"] = False
+            c["_funding_checks"].append(f"crunchbase: ${cb_data['total_funding_usd']:,.0f}")
             crunchbase_hits += 1
         else:
+            c["_funding_checks"].append("crunchbase: no API key" if not have_cb_key else "crunchbase: no match")
             still_unknown.append(c)
     if crunchbase_hits:
-        print(f"[Funding verify] Crunchbase: {crunchbase_hits} candidates verified")
+        print(f"[Funding verify] Crunchbase: {crunchbase_hits} verified")
+
+    # ----- Pass 1b: SEC EDGAR Form D (free, strict match) -----
+    sec_hits = 0
+    after_sec = []
+    for c in still_unknown:
+        sec = _sec_form_d_lookup(c["name"])
+        if sec:
+            c["total_funding_usd"] = sec["total_funding_usd"]
+            c["last_funding_date"] = sec.get("last_funding_date") or c.get("last_funding_date", "")
+            c["_funding_confidence"] = "medium"
+            c["_funding_source"] = sec["source_url"]
+            c["_funding_unverified"] = False
+            c["_funding_checks"].append(
+                f"sec form d: ${sec['total_funding_usd']:,.0f} over {sec['n_filings']} filing(s), "
+                f"as {sec['entity_name']}"
+            )
+            sec_hits += 1
+        else:
+            c["_funding_checks"].append("sec form d: no matching filing")
+            after_sec.append(c)
+        time.sleep(0.15)
+    still_unknown = after_sec
+    if sec_hits:
+        print(f"[Funding verify] SEC Form D: {sec_hits} verified")
 
     if not still_unknown:
         return
 
     # ----- Pass 2: Claude verification with strict source-citation rule -----
     names = [c["name"] for c in still_unknown][:40]
+    for c in still_unknown[40:]:
+        c["_funding_checks"].append("claude: skipped (per-run batch cap)")
     prompt = f"""You are verifying funding and team data for the seed-stage startups below.
 DO NOT estimate. DO NOT extrapolate from similar companies. DO NOT use general knowledge.
 DO NOT fabricate founder names — this is a CRITICAL anti-hallucination rule.
@@ -472,7 +950,7 @@ Companies: {json.dumps(names)}
 Return ONLY a JSON object mapping company name to the fields above. No preamble."""
     try:
         resp = ai_client.messages.create(
-            model="claude-opus-4-7", max_tokens=2000,
+            model=MODEL, max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
         verified = json.loads(resp.content[0].text.strip())
@@ -481,16 +959,21 @@ Return ONLY a JSON object mapping company name to the fields above. No preamble.
         for c in still_unknown:
             info = verified.get(c["name"], {})
             if not info:
+                c["_funding_checks"].append("claude: no response for this company")
+                unverified_count += 1
                 continue
             confidence = (info.get("confidence") or "").lower()
-            if confidence in ("low", "unverified"):
-                c["_funding_confidence"] = confidence
-                c["_funding_source"] = info.get("source_citation") or "no source"
+            if confidence in ("low", "unverified") or info.get("total_funding_usd") is None:
+                c["_funding_confidence"] = confidence or "unverified"
+                c["_funding_checks"].append("claude: no citable source")
                 unverified_count += 1
                 continue
             if info.get("total_funding_usd") is not None:
                 c["total_funding_usd"] = info["total_funding_usd"]
                 c["_funding_unverified"] = False  # cleared: cited source provided
+                c["_funding_checks"].append(
+                    f"claude: ${info['total_funding_usd']:,.0f} — {info.get('source_citation') or 'cited'}"
+                )
                 updated += 1
             if info.get("last_round_type"):
                 c["last_funding_round"] = info["last_round_type"]
@@ -516,7 +999,24 @@ Return ONLY a JSON object mapping company name to the fields above. No preamble.
             c["_funding_source"] = info.get("source_citation") or "Claude verified"
         print(f"[Funding verify] Claude: {updated} verified, {unverified_count} flagged as unverified")
     except Exception as e:
-        print(f"[Funding verify] Claude error: {e} — proceeding with original data")
+        record_llm_error("funding verification pass", e)
+        for c in still_unknown:
+            c["_funding_checks"].append("claude: verification pass errored")
+        print("[Funding verify] proceeding with pre-verification data for this batch")
+
+    _finalize_unverified(still_unknown)
+
+
+def _finalize_unverified(candidates: list) -> None:
+    """For any candidate still at $0 after all passes, make the state legible:
+    _funding_source becomes the joined audit trail so the sheet/digest can show
+    exactly what was tried."""
+    for c in candidates:
+        if safe_float(c.get("total_funding_usd", 0)) == 0:
+            c["_funding_unverified"] = True
+            c.setdefault("_funding_confidence", "unverified")
+            checks = c.get("_funding_checks") or []
+            c["_funding_source"] = ("tried — " + "; ".join(checks)) if checks else "no verification attempted"
 
 
 # ============================================================================
@@ -586,7 +1086,7 @@ Description: {str(candidate.get("description", ""))[:500]}
 Return ONLY: SCORE: N | REASON: one short sentence"""
     try:
         resp = ai_client.messages.create(
-            model="claude-opus-4-7", max_tokens=200,
+            model=MODEL, max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.content[0].text.strip()
@@ -603,35 +1103,96 @@ Return ONLY: SCORE: N | REASON: one short sentence"""
                 reason = line.split(":", 1)[1].strip()
         return max(1, min(3, score)), reason or "consumer eval no reason"
     except Exception as e:
-        print(f"    Consumer Second Layer eval error for {candidate.get('name')}: {e}")
-        return 2, "consumer eval error, defaulted to borderline"
+        record_llm_error(f"consumer Second Layer eval for {candidate.get('name')}", e)
+        # Fail CLOSED — score < 2 excludes the candidate downstream.
+        return 1, "consumer Second Layer eval failed (LLM error) — excluded"
+
+
+def _funding_line(cand: dict) -> str:
+    val = safe_float(cand.get("total_funding_usd", 0))
+    conf = (cand.get("_funding_confidence") or "").lower()
+    src = str(cand.get("_funding_source") or "").strip()
+    # Surface any confirm-step flag (CONFLICT / STAGE_MISMATCH / STALE).
+    flags = [c.split("—", 1)[-1].strip() for c in (cand.get("_funding_checks") or [])
+             if str(c).startswith("confirm:")]
+    warn = f"  [!] {'; '.join(flags)}" if flags else ""
+    if cand.get("_funding_unverified") or conf in ("", "low", "unverified") or val == 0:
+        src = src[len("tried — "):] if src.startswith("tried — ") else src
+        return (f"unverified (checked {src})" if src else "unverified") + warn
+    date = cand.get("last_funding_date") or ""
+    tag = " (single source)" if conf == "medium" else ""
+    return f"${val:,.0f}{(' as of ' + date) if date else ''}{tag} — {src}" + warn
+
+
+def build_outreach_digest(scored: list) -> str:
+    """Plain-text digest of the top candidates with outreach details, for the
+    email to the analyst. `scored` is expected pre-sorted (best first); items
+    may carry a "contact" dict from enrich_contact()."""
+    lines = [f"{len(scored)} candidate(s) scored above threshold. Top {min(DIGEST_TOP_N, len(scored))} for outreach:\n"]
+    for i, c in enumerate(scored[:DIGEST_TOP_N], 1):
+        cand = c["candidate"]
+        contact = c.get("contact") or {}
+        lines.append(f"{i}. {cand.get('name', '?')}  —  {c['weighted_pct']}%  {c['decision']}")
+        if c.get("summary"):
+            lines.append(f"   {c['summary']}")
+        if c.get("founders"):
+            lines.append(f"   Founders: {c['founders']}")
+        lines.append(f"   Second Layer: {c.get('sl_reason', '')}")
+        lines.append(f"   Funding: {_funding_line(cand)}")
+        if c.get("strengths"):
+            lines.append(f"   + {c['strengths']}")
+        if c.get("risks"):
+            lines.append(f"   - {c['risks']}")
+        website = contact.get("website") or cand.get("website") or "—"
+        email = contact.get("email") or "—"
+        linkedin = contact.get("linkedin") or cand.get("linkedin_url") or "—"
+        lines.append(f"   Website:  {website}")
+        lines.append(f"   Email:    {email}   ({contact.get('note', 'not looked up')})")
+        lines.append(f"   LinkedIn: {linkedin}")
+        lines.append("")
+    if len(scored) > DIGEST_TOP_N:
+        lines.append(f"(+{len(scored) - DIGEST_TOP_N} more in the sheet)")
+    return "\n".join(lines)
 
 
 def main():
-    override = os.environ.get("VERTICAL_INDEX", "")
-    if override.strip():
+    ai_client = get_anthropic_client()
+    industry_query = os.environ.get("INDUSTRY_QUERY", "").strip()
+    override = os.environ.get("VERTICAL_INDEX", "").strip()
+
+    if industry_query:
+        # On-demand: synthesize a vertical from a free-text industry string.
+        print(f"Synthesizing vertical from industry query: {industry_query!r}")
+        vertical = synthesize_vertical(ai_client, industry_query, MODEL)
+        idx = "custom"
+        target_tab = ON_DEMAND_TAB
+        print(f"  -> {vertical['name']}: {len(vertical['keywords'])} keywords, "
+              f"{len(vertical['rss_feeds'])} valid feeds, {len(vertical['search_terms'])} search terms")
+    elif override:
         try:
             idx = int(override)
         except ValueError:
             raise RuntimeError(f"Invalid VERTICAL_INDEX: {override}")
         vertical = get_vertical(idx)
+        target_tab = VERTICAL_TAB
     else:
         idx, vertical = get_vertical_by_day_of_year()
+        target_tab = VERTICAL_TAB
 
     name = vertical["name"]
     keywords = vertical.get("keywords", [])
     rss_feeds = vertical.get("rss_feeds", [])
     search_terms = vertical.get("search_terms", [])
 
+    label = f"V{idx}" if isinstance(idx, int) else "on-demand"
     print(f"\n{'='*60}")
-    print(f"Vertical Pipeline — V{idx}: {name}")
+    print(f"Vertical Pipeline — {label}: {name}  ->  '{target_tab}' tab")
     print(f"Time: {datetime.now(timezone.utc).isoformat()}")
     print(f"{'='*60}\n")
 
     sheet_client = get_sheet_client()
-    ai_client = get_anthropic_client()
 
-    # Step 1: Source collection (Crustdata removed)
+    # Step 1: Source collection
     print("STEP 1: Pulling from vertical-specific sources")
     print("-" * 60)
     candidates = []
@@ -640,6 +1201,14 @@ def main():
     candidates.extend(source_techcrunch(keywords, name))
     candidates.extend(source_vertical_rss(rss_feeds, name))
     candidates.extend(source_vertical_claude_research(ai_client, search_terms, name))
+    if EXTRA_SOURCES_ENABLED:
+        candidates.extend(source_extra(vertical))
+    else:
+        print("[extra sources] skipped (EXTRA_SOURCES=0)")
+    if SCRAPE_LAYER_ENABLED:
+        candidates.extend(source_vertical_scrape(ai_client, sheet_client, vertical))
+    elif get_scrape_targets(vertical):
+        print("[scrape] skipped (SCRAPE_LAYER=0)")
     print(f"\nTotal raw: {len(candidates)}")
 
     # Step 1b: Verify funding for $0 candidates before gating
@@ -647,8 +1216,22 @@ def main():
     print("-" * 60)
     verify_zero_funding(ai_client, candidates)
 
+    # Step 1c: Confirm funding figures are internally consistent (cross-source
+    # agreement, stage/amount plausibility, staleness). Downgrades or clears
+    # figures that don't hold up — no bad number should reach the sheet clean.
+    print("\nSTEP 1c: Confirming funding reports")
+    print("-" * 60)
+    _fc = {}
+    for c in candidates:
+        verdict, note = confirm_funding_report(c)
+        if verdict != "OK":
+            _fc[verdict] = _fc.get(verdict, 0) + 1
+            print(f"  {verdict}: {c.get('name', '?')} — {note}")
+    print(f"Confirmed: {len(candidates) - sum(_fc.values())} clean, " +
+          (", ".join(f"{n}×{v}" for v, n in _fc.items()) if _fc else "0 flagged"))
+
     # Step 2: Dedup
-    existing = read_existing_names(sheet_client, VERTICAL_TAB)
+    existing = read_existing_names(sheet_client, target_tab)
     candidates = deduplicate(candidates, existing)
     print(f"After dedup: {len(candidates)}")
 
@@ -733,23 +1316,52 @@ def main():
     scored.sort(key=lambda x: x["weighted_pct"], reverse=True)
     print(f"\nScored above threshold: {len(scored)}")
 
-    # Step 6: Write
-    print(f"\nSTEP 5: Writing to '{VERTICAL_TAB}' tab")
-    print("-" * 60)
-    write_scored_candidates(sheet_client, VERTICAL_TAB, scored, vertical_label=name)
+    # Step 5b: Contact enrichment for the top slice (website scrape only).
+    if scored and ENRICH_CONTACTS:
+        print(f"\nSTEP 5b: Contact lookup for top {min(DIGEST_TOP_N, len(scored))}")
+        print("-" * 60)
+        for c in scored[:DIGEST_TOP_N]:
+            info = enrich_contact(c["candidate"])
+            c["contact"] = info
+            # Fold enriched website/LinkedIn back onto the candidate so the sheet gets them.
+            if info.get("website"):
+                c["candidate"]["website"] = info["website"]
+            if info.get("linkedin") and not c["candidate"].get("linkedin_url"):
+                c["candidate"]["linkedin_url"] = info["linkedin"]
+            print(f"  {c['candidate']['name']:30s} email={info.get('email') or '—':30s} {info.get('note','')}")
 
-    # Step 7: Email
+    # Step 6: Write
+    print(f"\nSTEP 5: Writing to '{target_tab}' tab")
+    print("-" * 60)
+    write_scored_candidates(sheet_client, target_tab, scored, vertical_label=name)
+
+    # Step 7: Email digest
     if scored:
-        body_lines = [f"{c['candidate']['name']} — {c['weighted_pct']}% — {c['decision']}"
-                      for c in scored[:10]]
-        send_email_digest(
-            subject=f"Vertical Pipeline {name} — {len(scored)} candidates",
-            body=f"Vertical: {name}\n\n" + "\n".join(body_lines),
-        )
+        if industry_query:
+            subject = f"On-Demand Pipeline: {name} — {len(scored)} candidates"
+            header = f"Industry query: {industry_query}\nSynthesized vertical: {name}\n"
+        else:
+            subject = f"Vertical Pipeline {name} — {len(scored)} candidates"
+            header = f"Vertical: {name}\n"
+        send_email_digest(subject=subject, body=header + "\n" + build_outreach_digest(scored))
 
     print(f"\n{'='*60}")
-    print(f"Vertical pipeline V{idx} complete.")
+    print(f"Pipeline run complete — {label}: {name}")
     print(f"{'='*60}\n")
+
+    # Surface any swallowed LLM failures loudly. A run that "completes" while a
+    # chunk of its scoring/eval calls errored is not a healthy run — say so, and
+    # exit non-zero if the failures were widespread so the workflow shows red.
+    errors = llm_error_count()
+    if errors:
+        print("!" * 60, file=sys.stderr)
+        print(llm_error_summary(), file=sys.stderr)
+        print("!" * 60, file=sys.stderr)
+        if scored is not None and errors >= max(5, len(scored)):
+            raise RuntimeError(
+                f"{errors} LLM call errors this run vs only {len(scored)} scored "
+                f"candidates — treating the run as failed. Check API key / model / rate limits."
+            )
 
 
 if __name__ == "__main__":

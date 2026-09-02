@@ -9,6 +9,12 @@ on:
         description: 'Vertical index (0-21), leave blank for day-of-year rotation'
         required: false
         default: ''
+      industry_query:
+        description: 'On-demand: free-text industry/theme. Overrides vertical_index; writes to the "On-Demand Pipeline" tab.'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [run-industry-pipeline]
 
 jobs:
   run:
@@ -21,13 +27,37 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install anthropic requests gspread google-auth feedparser
+          pip install anthropic requests gspread google-auth feedparser playwright
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
+      - name: Install Chromium (V21 scrape layer — headless fallback)
+        run: python -m playwright install --with-deps chromium
       - name: Run vertical pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          # Optional: funding verification uses Crunchbase as pass 1 when this is set.
+          CRUNCHBASE_API_KEY: ${{ secrets.CRUNCHBASE_API_KEY }}
           VERTICAL_INDEX: ${{ github.event.inputs.vertical_index }}
+          # On-demand industry query: from a manual run's input, or a repository_dispatch
+          # (type: run-industry-pipeline) client_payload.industry_query.
+          INDUSTRY_QUERY: ${{ github.event.inputs.industry_query || github.event.client_payload.industry_query }}
+          # Optional: set repo variable PIPELINE_MODEL to pin/trial a model. Blank -> code default.
+          PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
+          # Optional: set repo variable EXTRA_SOURCES to "0" to skip YC Launches / Product Hunt / VC newsletters.
+          EXTRA_SOURCES: ${{ vars.EXTRA_SOURCES }}
+          # Optional: SCRAPE_LAYER="0" skips the scrape layer; SCRAPE_MAX_NEW caps new companies per run;
+          # SCRAPE_HEADLESS="0" forces static-only fetch (no Chromium fallback).
+          SCRAPE_LAYER: ${{ vars.SCRAPE_LAYER }}
+          SCRAPE_MAX_NEW: ${{ vars.SCRAPE_MAX_NEW }}
+          SCRAPE_HEADLESS: ${{ vars.SCRAPE_HEADLESS }}
+          # Optional: ENRICH_CONTACTS="0" skips the website email lookup; DIGEST_TOP_N sets how many go in the email.
+          ENRICH_CONTACTS: ${{ vars.ENRICH_CONTACTS }}
+          DIGEST_TOP_N: ${{ vars.DIGEST_TOP_N }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}

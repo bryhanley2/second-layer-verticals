@@ -12,8 +12,11 @@ Import this from other pipeline files:
 """
 
 import os
+import sys
+import re
 import json
 from datetime import datetime, timezone
+import anthropic
 from anthropic import Anthropic
 import gspread
 from google.oauth2.service_account import Credentials
@@ -22,6 +25,11 @@ from google.oauth2.service_account import Credentials
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "102k3pj7JjEhSXWgyBS144mgHd93MZywoWVyjWIonX50")
 MIN_SCORE_PCT = 65
 
+# Anthropic model for every sourcing / scoring / verification call in the pipeline.
+# One place to change it. Override with the PIPELINE_MODEL env var (e.g. to pin a
+# snapshot or trial a newer model) without a code edit.
+MODEL = os.environ.get("PIPELINE_MODEL", "claude-opus-4-7")
+
 ALLOWED_STAGES = {
     "pre-seed", "preseed", "pre_seed", "seed",
     "angel", "angel round", "friends and family",
@@ -29,6 +37,9 @@ ALLOWED_STAGES = {
 MAX_TOTAL_FUNDING = 10_000_000
 MAX_COMPANY_AGE_YEARS = 5
 MAX_MONTHS_SINCE_LAST_ROUND = 24
+# A verified funding figure whose round date is older than this gets a STALE
+# advisory — a newer round we didn't catch may have raised the real total.
+STALE_FUNDING_MONTHS = 15
 
 # Tightened thesis range for post-enrichment verification.
 # The initial gate uses MAX_TOTAL_FUNDING ($10M) as a hard ceiling, but the thesis
@@ -63,6 +74,53 @@ def get_sheet_client():
 
 def get_anthropic_client():
     return Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+
+# ---------- LLM call health ----------
+# Every Claude call in the pipeline is wrapped in try/except so one malformed
+# response can't kill a whole run. The danger is the inverse failure: a systemic
+# problem (bad key, wrong model id, sustained rate-limiting) gets swallowed and
+# the run still "succeeds" while writing default/garbage scores. These helpers
+# make that loud instead.
+_LLM_ERRORS: list = []
+
+# Errors that mean the whole run is misconfigured — no point scoring hundreds of
+# companies against an endpoint that will reject every call.
+_FATAL_LLM_ERRORS = (
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+    anthropic.NotFoundError,
+)
+
+
+def record_llm_error(context: str, exc: Exception) -> None:
+    """Log an LLM call failure to stderr and remember it for the end-of-run summary.
+
+    Raises RuntimeError on fatal misconfiguration (bad credentials / unknown
+    model) so the run stops instead of producing a sheet full of defaults.
+    """
+    msg = f"[LLM ERROR] {context}: {type(exc).__name__}: {exc}"
+    print(msg, file=sys.stderr)
+    _LLM_ERRORS.append(msg)
+    if isinstance(exc, _FATAL_LLM_ERRORS):
+        raise RuntimeError(
+            f"Fatal LLM configuration error ({type(exc).__name__}). "
+            f"Check ANTHROPIC_API_KEY and PIPELINE_MODEL (currently '{MODEL}')."
+        ) from exc
+
+
+def llm_error_count() -> int:
+    return len(_LLM_ERRORS)
+
+
+def llm_error_summary() -> str:
+    if not _LLM_ERRORS:
+        return "No LLM call errors this run."
+    lines = [f"{len(_LLM_ERRORS)} LLM call error(s) this run:"]
+    lines.extend(f"  - {m}" for m in _LLM_ERRORS[:20])
+    if len(_LLM_ERRORS) > 20:
+        lines.append(f"  ... and {len(_LLM_ERRORS) - 20} more")
+    return "\n".join(lines)
 
 
 # ---------- Type coercion helpers ----------
@@ -120,7 +178,7 @@ def passes_stage_gate(candidate: dict):
 def passes_funding_gate(candidate: dict):
     total = safe_float(candidate.get("total_funding_usd", 0))
     # If funding is 0 or missing, only pass if stage is explicitly pre-seed/seed
-    # to avoid letting well-funded companies through with blank Crustdata fields.
+    # to avoid letting well-funded companies through on blank/missing funding fields.
     if total == 0:
         stage = str(candidate.get("last_funding_round", "") or candidate.get("stage", "")).strip().lower()
         if stage in {"pre-seed", "preseed", "seed", "angel", "grant", "accelerator", ""}:
@@ -209,6 +267,99 @@ def verify_size_post_enrichment(candidate: dict):
     return "IN_RANGE", f"IN target range — ${total:,.0f} within ${TARGET_FUNDING_FLOOR:,.0f}-${TARGET_FUNDING_CEILING:,.0f} sweet spot"
 
 
+# ---------- Funding-report confirmation ----------
+_MONEY_RE = re.compile(r"\$\s?([\d,]+)")
+
+
+def _figures_from_checks(checks) -> dict:
+    """Pull {source_kind: usd} out of the _funding_checks audit strings.
+    source_kind is one of crunchbase / sec / claude / other."""
+    out = {}
+    for line in checks or []:
+        m = _MONEY_RE.search(str(line))
+        if not m:
+            continue
+        try:
+            val = float(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+        if val <= 0:
+            continue
+        low = str(line).lower()
+        kind = ("crunchbase" if low.startswith("crunchbase")
+                else "sec" if "sec form d" in low
+                else "claude" if low.startswith("claude")
+                else "other")
+        out[kind] = max(out.get(kind, 0.0), val)
+    return out
+
+
+def confirm_funding_report(candidate: dict):
+    """Cross-check a *verified* funding figure for internal consistency, AFTER
+    verify_zero_funding has run. Mutates the candidate: non-OK verdicts append to
+    _funding_checks and downgrade _funding_confidence; an unresolvable CONFLICT
+    clears the figure back to $0/unverified.
+
+    Verdicts: OK | CONFLICT | STAGE_MISMATCH | STALE. Returns (verdict, note).
+    Companies with no figure (total == 0) return ("OK", ...) — nothing to confirm.
+    """
+    candidate.setdefault("_funding_checks", [])
+    total = safe_float(candidate.get("total_funding_usd", 0))
+    if total <= 0:
+        return "OK", "no figure to confirm"
+
+    notes, verdict = [], "OK"
+
+    # 1. Cross-source agreement --------------------------------------------------
+    figs = _figures_from_checks(candidate.get("_funding_checks"))
+    if len(figs) >= 2:
+        lo, hi = min(figs.values()), max(figs.values())
+        if hi - lo > 1_000_000 and hi > lo * 1.5:
+            pairs = ", ".join(f"${v:,.0f} ({k})" for k, v in sorted(figs.items()))
+            if "sec" in figs:
+                # SEC Form D is a legal filing — trust it, keep the company, flag it.
+                candidate["total_funding_usd"] = figs["sec"]
+                total = figs["sec"]
+                candidate["_funding_source"] = candidate.get("_funding_source") or "SEC Form D"
+                notes.append(f"sources disagree ({pairs}) — using the SEC figure")
+                verdict = "CONFLICT"
+            else:
+                notes.append(f"sources disagree ({pairs}) with no authoritative source — cleared to unverified")
+                candidate["total_funding_usd"] = 0
+                candidate["_funding_unverified"] = True
+                candidate["_funding_confidence"] = "unverified"
+                candidate["_funding_checks"].append("confirm: CONFLICT — " + notes[-1])
+                return "CONFLICT", notes[-1]
+
+    # 2. Stage / amount plausibility -------------------------------------------
+    stage = str(candidate.get("last_funding_round", "") or candidate.get("stage", "")).strip().lower()
+    if stage in {"pre-seed", "preseed", "pre_seed"} and total > 5_000_000:
+        verdict = "STAGE_MISMATCH"
+        notes.append(f"labelled '{stage}' but ${total:,.0f} verified — likely mislabelled or later-stage")
+    elif stage == "seed" and total > 12_000_000:
+        verdict = "STAGE_MISMATCH"
+        notes.append(f"labelled 'seed' but ${total:,.0f} verified")
+
+    # 3. Staleness ------------------------------------------------------------
+    d = parse_date(candidate.get("last_funding_date", ""))
+    if d:
+        months = (datetime.now() - d).days / 30
+        if months > STALE_FUNDING_MONTHS:
+            notes.append(f"figure is ~{months:.0f} months old — current total may be higher")
+            if verdict == "OK":
+                verdict = "STALE"
+
+    if verdict != "OK":
+        cur = (candidate.get("_funding_confidence") or "").lower()
+        if verdict in ("CONFLICT", "STAGE_MISMATCH"):
+            # one notch down; STAGE_MISMATCH on a real figure should not read as a clean seed number
+            candidate["_funding_confidence"] = {"high": "medium", "medium": "low"}.get(cur, cur or "low")
+        for n in notes:
+            candidate["_funding_checks"].append(f"confirm: {verdict} — {n}")
+
+    return verdict, "; ".join(notes) or "consistent"
+
+
 # ---------- Second Layer thesis filter ----------
 def evaluate_second_layer_fit(ai_client: Anthropic, candidate: dict):
     """
@@ -239,7 +390,7 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
 
     try:
         response = ai_client.messages.create(
-            model="claude-opus-4-7",
+            model=MODEL,
             max_tokens=100,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -249,8 +400,10 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
         reason = parts[1].strip() if len(parts) > 1 else ""
         return score, reason
     except Exception as e:
-        print(f"    Second Layer eval error for {candidate.get('name')}: {e}")
-        return 2, "eval error, defaulted to borderline"
+        record_llm_error(f"Second Layer eval for {candidate.get('name')}", e)
+        # Fail CLOSED: callers treat score >= 2 as "passes the thesis filter", so a
+        # failed eval must score 0/1, never the old default of 2 that let it through.
+        return 0, "Second Layer eval failed (LLM error) — excluded"
 
 
 # ---------- 9-factor scoring ----------
@@ -294,7 +447,7 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
 
     try:
         response = ai_client.messages.create(
-            model="claude-opus-4-7",
+            model=MODEL,
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -338,8 +491,10 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
             "founders": meta["founders"],
         }
     except Exception as e:
-        print(f"    Scoring error for {candidate.get('name')}: {e}")
-        return {"scores": {}, "weighted_pct": 0, "summary": "", "strengths": "", "risks": f"Error: {e}", "founders": ""}
+        record_llm_error(f"9-factor scoring for {candidate.get('name')}", e)
+        # weighted_pct 0 drops the candidate at the threshold check — fail closed.
+        return {"scores": {}, "weighted_pct": 0, "summary": "", "strengths": "",
+                "risks": f"scoring failed (LLM error): {e}", "founders": ""}
 
 
 def decision_from_score(pct: float) -> str:
@@ -391,7 +546,7 @@ def read_existing_names(client, tab_name: str) -> set:
 
 def write_scored_candidates(client, tab_name: str, scored: list, vertical_label: str = ""):
     """Append scored candidates to the specified tab."""
-    tab = ensure_tab(client, tab_name, headers=PIPELINE_HEADERS)
+    tab = ensure_tab(client, tab_name, headers=PIPELINE_HEADERS, cols=len(PIPELINE_HEADERS) + 2)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rows = []
     for c in scored:
@@ -403,12 +558,14 @@ def write_scored_candidates(client, tab_name: str, scored: list, vertical_label:
         funding_val = safe_float(cand.get("total_funding_usd", 0))
         conf = (cand.get("_funding_confidence") or "").lower()
         size_status = cand.get("_size_status", "")
+        src = str(cand.get("_funding_source") or "").strip()
         if conf in ("low", "unverified") or cand.get("_funding_unverified"):
-            funding_display = f"{funding_val:.0f} (UNVERIFIED)"
-        elif conf == "medium":
-            funding_display = f"{funding_val:.0f} (single-source)"
+            # src here is the "tried — crunchbase: ...; sec form d: ...; claude: ..." trail.
+            funding_display = f"UNVERIFIED · {src}" if src.startswith("tried") else "UNVERIFIED"
         else:
-            funding_display = funding_val
+            label = {"high": "", "medium": " (single source)"}.get(conf, "")
+            short_src = src.split("://", 1)[-1].split("/", 1)[0] if src.startswith("http") else src
+            funding_display = f"{funding_val:,.0f}{label}" + (f" · {short_src}" if short_src else "")
         # Append the thesis-range size status (IN_RANGE / ABOVE_RANGE / BELOW_RANGE)
         # so a reviewer sees at a glance whether a company is in the $1.8M-$4M sweet
         # spot or merely under the $10M hard cap.
@@ -420,7 +577,7 @@ def write_scored_candidates(client, tab_name: str, scored: list, vertical_label:
             cand.get("last_funding_round", cand.get("stage", "")),
             funding_display,
             vertical_label or cand.get("industry", ""),
-            cand.get("_source", "Crustdata"),
+            cand.get("_source", "unknown"),
             c.get("sl_reason", ""),
             str(cand.get("description", ""))[:400],
             "Yes",

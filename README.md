@@ -84,7 +84,14 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 
 ## Pipeline Architecture
 
-### Main Pipeline Sources
+> **Scope of this repo:** this repository is the **vertical pipeline** only
+> (`vertical_pipeline.py`, per-vertical sourcing V0–V21). The broader
+> **Main Pipeline** (`sourcer.py` / `main_pipeline.yml` — a single cross-industry
+> daily run) lives in a **separate repository** and is not part of this codebase.
+> The Main Pipeline section below is retained for context on the overall system;
+> the `Pipeline` sheet tab it writes to is shared between both repos.
+
+### Main Pipeline Sources *(separate repo — reference only)*
 
 | Source | Frequency | Volume | Quality |
 |--------|-----------|--------|---------|
@@ -100,7 +107,7 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 
 ### Vertical Pipeline Sources (V0–V21)
 
-The vertical pipeline runs per-vertical and uses five free sources, each filtered by the vertical's keywords:
+The vertical pipeline runs per-vertical and uses these free sources, each filtered by the vertical's keywords:
 
 | Source | How it's filtered | Notes |
 |--------|-------------------|-------|
@@ -109,26 +116,67 @@ The vertical pipeline runs per-vertical and uses five free sources, each filtere
 | TechCrunch | Vertical keywords + seed-stage terms | Venture/startups/seed-funding feeds |
 | Vertical RSS | Sector-specific publications | 2–5 feeds per vertical |
 | Claude Research | Vertical-specific search terms | Highest framework alignment |
+| YC Launch HN | Vertical keywords against the launch pitch | Last ~8 months of "Launch HN" posts, recent-batch only (`new_sources.py`) |
+| Product Hunt | Vertical keywords against title + tagline | ~50 newest products; mostly noise outside consumer/AI verticals (`new_sources.py`) |
+| VC Newsletters | Funding-headline extraction + vertical keywords | StrictlyVC, a16z, Newcomer, Not Boring, The Diff, … via the Vertical RSS parser |
+| Scrape layer | Claude extraction from the vertical's `scrape_targets` + run-over-run diff | Specialist-fund portfolios / accelerator cohorts; 15 of 22 verticals (see **Proprietary Scrape Layer** below) |
+
+YC Launch HN / Product Hunt / VC Newsletters run in STEP 1 unless `EXTRA_SOURCES=0`; the scrape layer unless `SCRAPE_LAYER=0`.
 
 > **Note on V20 (Consumer Health & Wellness Brands):** This vertical sources primarily through CPG-specific RSS feeds (FoodNavigator-USA, BevNET, Nosh, Beauty Independent, Food Dive) and Claude Research. YC, SEC Form D, and SBIR sources contribute minimally for consumer brands but do not require separate infrastructure.
 
-All candidates pass a **funding verification step** (Claude fills in funding/stage for $0 candidates, requiring a citable source or returning null — never guessing) before the three hard gates run, and V21 additionally runs a **post-enrichment size re-check** (see below).
+All $0-funding candidates pass a **multi-source funding verification step** before the three hard gates run (and V21 additionally runs a **post-enrichment size re-check** — see below):
 
-### Proprietary Sourcing Layer (V21 Only)
+1. **Crunchbase API** — only if `CRUNCHBASE_API_KEY` is set (`high` confidence)
+2. **SEC EDGAR Form D** — the company's own filings, *strict* name match, fund/SPV entities rejected; sums `totalAmountSold` across filings (`medium` confidence, filing URL as the citation) — this is what catches the "labelled seed, actually raised $170M" case
+3. **Claude** — with a hard source-citation requirement; returns null (never a guess) when it can't cite one
 
-V21 uses everything above **plus an 18-target scrape layer** the other 21 verticals don't have. The five-source list above is press-and-announcement based — every fund scraping YC and TechCrunch sees the same companies. The scrape layer surfaces companies *before* they appear in venture press:
+Every candidate carries a `_funding_checks` audit trail. A verified figure ships with its source URL; an unverified one ships with exactly what was tried (`unverified (checked crunchbase: no key; sec form d: no filing; claude: no source)`) so the analyst knows what to check by hand.
 
-| Channel Group | Example Targets | Why It's Proprietary |
-|---|---|---|
-| DOE program ecosystems | AI4IX, i2X, ConnectWERX, SBIR/STTR | Federal non-dilutive validation, pre-VC teams |
-| Specialist fund portfolios | Powerhouse, Stepchange, Convective, MCJ | These funds converge repeatedly on the fund's own comps — diffing their portfolio pages catches new checks before press |
-| Regional/state cohorts | NYSERDA, Urban Future Lab, The Clean Fight | NY-local, relationship-buildable |
-| Accelerator cohorts | Third Derivative, Elemental Impact, Greentown Labs | Low hit rate by design (one 2026 cohort was ~90% hardware) — the filter is what makes the channel valuable |
-| RTO/ISO market registrations | ERCOT, PJM | A software company registering as a market participant is a leading commercialization signal |
+**Then a confirmation pass** (`confirm_funding_report`, STEP 1c) cross-checks each verified figure:
 
-**Proven results from this layer:** Glacian Technologies (university tech-transfer, Penn State) and GridBoost / ContractPower (DOE AI4IX teaming list) — none of which would have surfaced through the standard five-source pipeline.
+- **Cross-source agreement** — if two passes produced figures that disagree by >1.5× and >$1M: trust the SEC filing if there is one (and flag), otherwise clear the figure back to unverified
+- **Stage/amount plausibility** — "pre-seed" + >$5M or "seed" + >$12M → `STAGE_MISMATCH`, confidence downgraded so it doesn't read as a clean seed number
+- **Staleness** — figure's round date older than 15 months → `STALE` advisory (a newer round may have raised the real total)
 
-**Implementation status:** `scrape_targets` and `scrape_filters` are configured in `vertical_sources.py` with a working pre-filter (`passes_scrape_filter()`) that rejects hardware/materials companies by keyword before expensive enrichment runs. A dedicated `source_vertical_scrape()` fetcher (HTML parsing + run-over-run diffing) is **not yet built** — this is the next implementation step, not a live source today.
+Flags show in the digest (`[!] labelled 'seed' but $14M verified; figure is ~19 months old`). Only *then* does the post-enrichment size re-check (`verify_size_post_enrichment`) apply the $10M hard cap.
+
+### Proprietary Scrape Layer
+
+The sources above are press-and-announcement based — every fund scraping YC and TechCrunch sees the same companies. Each vertical with a `scrape_targets` list also gets a scrape pass that surfaces companies *before* they appear in venture press, by diffing specialist-fund portfolios / accelerator cohorts / program awardee lists run over run.
+
+**Coverage (15 of 22 verticals, ~55 targets):**
+
+| Vertical | Example targets |
+|---|---|
+| V0 Energy/Climate | Congruent, Lowercarbon, Clean Energy Ventures, EIP |
+| V2 Fintech | QED, Nyca, Commerce Ventures |
+| V3 Space | Space Capital, Seraphim |
+| V5 Biotech/Medtech | IndieBio, Nucleate, Petri |
+| V6 Supply Chain | Dynamo, Interlace, 4DX |
+| V8 Cybersecurity | Ten Eleven, YL Ventures, ForgePoint, NightDragon, SYN |
+| V9 Insurance/RE | Fifth Wall, MetaProp |
+| V10 Healthcare | Rock Health, .406 Ventures |
+| V11 Agtech | AgFunder, S2G, Fall Line |
+| V13 AI Agents | Air Street, Basis |
+| V16 Defense | a16z American Dynamism, 8VC, Decisive Point |
+| V17 Robotics | Eclipse, Lux |
+| V18 Elder Care | Primetime Partners, Ziegler Link-Age |
+| V20 Consumer CPG | XRC Labs, Springdale |
+| **V21** AI Physical Infra | DOE AI4IX/i2X, Powerhouse, Stepchange, MCJ, NYSERDA, Third Derivative, Elemental, Greentown, ERCOT, PJM (17 targets) |
+
+**Proven results (V21):** Glacian Technologies (Penn State tech-transfer), GridBoost / ContractPower (DOE AI4IX teaming list) — none would have surfaced through the standard sources.
+
+**How `source_vertical_scrape()` works:**
+
+1. Fetch each `scrape_target` — static `requests` GET first, then a **headless Chromium render (Playwright)** when the static result is a JS shell.
+2. Claude extracts operating-company names from each page (skips nav, fund names, report titles; text-only, no inference; the vertical's name + keywords steer it).
+3. `passes_scrape_filter()` drops rejects by keyword — a common set (exits, public companies, law firms, SPVs) plus per-vertical lists (software verticals reject hardware/manufacturing; V5 rejects drug-pipeline companies; V20 rejects B2B software). Block/parked pages are skipped before spending a Claude call.
+4. Diff against the **`Scrape Seen`** sheet tab — only names *not seen in a prior run* enter the pipeline. Every surfaced name is recorded immediately, so a company that later fails the gates isn't re-extracted. First run per vertical is capped at `SCRAPE_MAX_NEW` (default 50).
+
+Survivors flow through the normal gates → funding verification → Second Layer filter → 9-factor scoring. Disable the layer with `SCRAPE_LAYER=0`, the headless fallback with `SCRAPE_HEADLESS=0` (legacy `V21_SCRAPE*` names still work).
+
+**Headless fetch** needs `playwright` + `playwright install chromium` (the workflow does both, cached). Verified live: 38/38 non-V21 targets + 15/17 V21 targets return usable content; parked/bot-blocked ones (Powerhouse, Urban Future Lab) are skipped gracefully.
 
 ### V21 Funding Range (Tighter Than Other Verticals)
 
@@ -195,11 +243,13 @@ All three must pass or the company is excluded:
 | Tab | Contents |
 |-----|----------|
 | Pipeline | All candidates scoring above threshold from main pipeline runs |
-| Vertical Pipeline | Candidates organized by vertical (V0–V20) |
+| Vertical Pipeline | Candidates organized by vertical (V0–V21) |
+| On-Demand Pipeline | Candidates from free-text `INDUSTRY_QUERY` runs (auto-created) |
 | Vertical Reference | V0–V21 schema reference with Second Layer logic and example companies |
 | Founder Pipeline | Direct founder sourcing and outreach tracking |
 | Pipeline Archive | Historical pipeline runs |
 | Company Pipeline | Extended company tracking |
+| Scrape Seen | Run-over-run state for the scrape layer (auto-created) |
 | Empty (copy paste) | Template tab |
 
 ### Pipeline Headers (26 columns)
@@ -214,9 +264,49 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 
 | Workflow | File | Schedule | Trigger |
 |----------|------|----------|---------|
-| Main Pipeline | `main_pipeline.yml` | Daily 12:00 UTC | Cron + manual |
-| Vertical Pipeline | `vertical_pipeline.yml` | Daily 13:00 UTC | Cron + manual (index 0–21) |
+| Vertical Pipeline | `vertical_pipeline.yml` | Daily 10:30 UTC | Cron + manual (index 0–21) + `industry_query` + `repository_dispatch` |
 | Test APIs | `test_apis.yml` | Manual | GitHub Actions |
+
+*(The Main Pipeline workflow runs from its own repo.)*
+
+---
+
+## On-Demand Pipeline (any industry)
+
+Instead of one of the 22 predefined verticals, the pipeline can be run against a
+**free-text industry or theme**. Claude synthesizes a vertical config for it —
+name, Second Layer framing, 12–18 keywords, Claude-research search terms, and
+2–5 candidate RSS feeds (each fetched and parsed; hallucinated feeds are dropped).
+The full pipeline then runs for that synthesized vertical and writes to a separate
+**`On-Demand Pipeline`** sheet tab.
+
+**Ways to trigger:**
+
+| How | Command / payload |
+|---|---|
+| Locally | `INDUSTRY_QUERY="precision fermentation" python vertical_pipeline.py` |
+| GitHub UI | Run *Vertical Pipeline* → fill in **industry_query** |
+| API / app | `repository_dispatch` with `event_type: run-industry-pipeline`, `client_payload: { "industry_query": "..." }` |
+
+`INDUSTRY_QUERY` overrides `VERTICAL_INDEX`. The V21 scrape layer is skipped
+(synthesized verticals have no `scrape_targets`); every other source runs.
+
+---
+
+## Outreach Digest
+
+After scoring, the top `DIGEST_TOP_N` (default 10) candidates get a
+**website-only** contact lookup (`contact_enrich.py`): fetch the company site's
+home / contact / about / team pages and pull the best public email
+(`founders@` > `team@` > `hello@` > `info@` …, on-domain preferred) plus a
+company/founder LinkedIn URL if one is linked. **No LinkedIn scraping, no paid
+APIs, no email-guessing.** Email hit rate is realistically ~40–60% — many
+startups only expose a form, in which case the digest says so.
+
+The digest (name, score, decision, summary, founders, Second Layer logic,
+strengths/risks, website, email, LinkedIn) is emailed to `EMAIL_RECIPIENT`.
+Enriched website/LinkedIn values are also written back to the sheet row.
+Set `ENRICH_CONTACTS=0` to skip the lookup.
 
 ---
 
@@ -224,18 +314,21 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 
 ```
 /
-├── sourcer.py              # Main sourcing logic (YC, SEC, TechCrunch, SBIR, HF, PH, HN, RSS, Claude)
-├── vertical_pipeline.py    # Vertical pipeline runner (5 sources per vertical)
+├── vertical_pipeline.py    # Vertical pipeline runner (sources 1–7 per vertical)
 ├── vertical_sources.py     # V0–V21 vertical schema (keywords, RSS feeds, search terms, V21 scrape targets)
-├── pipeline_utils.py       # Scoring, gates, sheet writing, funding verification
+├── new_sources.py          # YC Launch HN + Product Hunt sources, VC newsletter feed list
+├── contact_enrich.py       # Website-only outreach lookup (public email + LinkedIn) for the digest
+├── pipeline_utils.py       # Model constant, gates, scoring, funding verification, sheet I/O, LLM-error tracking
 ├── test_apis.py            # API credential diagnostic
+├── sheets_logger_py        # Legacy alternate sheet writer — not wired in
 ├── .github/
 │   └── workflows/
-│       ├── main_pipeline.yml
 │       ├── vertical_pipeline.yml
 │       └── test_apis.yml
 └── README.md
 ```
+
+`sourcer.py` and `main_pipeline.yml` belong to the separate Main Pipeline repo.
 
 ---
 
@@ -246,6 +339,8 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 | `ANTHROPIC_API_KEY` | Claude Research sourcing, scoring, funding verification |
 | `GOOGLE_CREDENTIALS_JSON` | Sheet read/write |
 | `GOOGLE_SHEET_ID` | Target sheet |
+| `GMAIL_USER` / `GMAIL_APP_PASSWORD` / `EMAIL_RECIPIENT` | Outreach digest email (optional — skipped if unset) |
+| `CRUNCHBASE_API_KEY` | Funding verification pass 1 (optional — SEC + Claude run without it) |
 | `GITHUB_TOKEN` | GitHub search source (optional) |
 
 ---
@@ -259,13 +354,14 @@ Date | Company | Stage | Total Raised | Vertical | Source | Second Layer Logic |
 | TechCrunch | ✅ Working | Venture/startups/seed-funding feeds |
 | SBIR/STTR | ✅ New | Government grant signal, keyword-filtered |
 | Hugging Face | ✅ New | Trending AI orgs, big labs filtered out |
-| Product Hunt | ✅ New | Daily leaders via RSS |
+| YC Launch HN | ✅ New | Recent "Launch HN" posts via HN Algolia, keyword + recent-batch filtered |
+| Product Hunt | ✅ New | ~50 newest products via Atom feed, keyword-filtered; strong only for consumer/AI verticals |
+| VC Newsletters | ✅ New | StrictlyVC / a16z / Newcomer / Not Boring / The Diff via the funding-headline RSS parser |
 | RSS Funding | ✅ Working | 2–3 sector feeds per vertical |
 | Claude Research | ✅ Working | 6–8 high-quality candidates/run |
 | HN Show | ✅ Working | Main pipeline only |
-| Crustdata | ❌ Removed | Retired June 2026 |
 | GitHub Search | ⚠️ Skipped | Requires GITHUB_TOKEN secret |
-| V21 Scrape Layer | ⚠️ Configured, not live | `scrape_targets`/`scrape_filters` defined in `vertical_sources.py`; fetcher (`source_vertical_scrape()`) not yet implemented |
+| Scrape Layer | ✅ Live (static + headless) | `source_vertical_scrape()` — 15/22 verticals with `scrape_targets`; static/Playwright fetch + Claude extraction + filter + run-over-run diff via the `Scrape Seen` tab. |
 
 **Funding data integrity (Aug 2026 fix):** the Claude Research sourcing step no longer asks the model to produce funding figures directly — it fabricated plausible-but-wrong numbers (e.g. recycling one company's raise onto another). Funding is now sourced only through the verification pass, which requires a citable source or returns null. Companies with unconfirmed funding are flagged `(UNVERIFIED)` in the sheet rather than shown with a bare number.
 

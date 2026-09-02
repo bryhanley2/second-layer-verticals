@@ -9,10 +9,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: 3.11
-      - run: pip install anthropic requests gspread google-auth
+      - run: pip install anthropic gspread google-auth
       - run: python test_apis.py
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CRUSTDATA_API_KEY: ${{ secrets.CRUSTDATA_API_KEY }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
