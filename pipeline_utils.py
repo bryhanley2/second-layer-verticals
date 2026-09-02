@@ -196,7 +196,7 @@ def passes_funding_gate(candidate: dict):
 
 
 def passes_age_gate(candidate: dict):
-    founded_year = parse_year(candidate.get("founded_date", ""))
+    founded_year = parse_year(candidate.get("founded_date") or candidate.get("founded_year") or "")
     if founded_year:
         age = datetime.now().year - founded_year
         if age > MAX_COMPANY_AGE_YEARS:
@@ -401,10 +401,14 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text.strip()
-        parts = text.split("|", 1)
-        score = int(parts[0].strip()[0])
-        reason = parts[1].strip() if len(parts) > 1 else ""
-        return score, reason
+        # Claude sometimes prefixes "SCORE: 3 | ..." or "Score|..." — pull the
+        # first 1-3 digit in the text rather than assuming position 0.
+        m = re.search(r"[123]", text)
+        if not m:
+            raise ValueError(f"no 1-3 score in Second Layer response: {text[:80]!r}")
+        score = int(m.group(0))
+        reason = text.split("|", 1)[1].strip() if "|" in text else text[m.end():].lstrip(" :|-").strip()
+        return score, reason[:200]
     except Exception as e:
         record_llm_error(f"Second Layer eval for {candidate.get('name')}", e)
         # Fail CLOSED: callers treat score >= 2 as "passes the thesis filter", so a
@@ -414,16 +418,27 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
 
 # ---------- 9-factor scoring ----------
 def score_candidate(ai_client: Anthropic, candidate: dict, sl_reason: str):
+    _raised = safe_float(candidate.get("total_funding_usd", 0))
+    if _raised > 0:
+        raised_line = f"${_raised:,.0f}"
+    else:
+        # Don't show "$0" — it reads to the model as "raised nothing / not real".
+        raised_line = (f"not publicly disclosed (early-stage; sourced via "
+                       f"{candidate.get('_source', 'the pipeline')})")
+    founded = candidate.get("founded_date") or candidate.get("founded_year") or "unknown"
     prompt = f"""Score this seed-stage company on 9 factors (1-10 each).
 
 Company: {candidate.get("name")}
 Description: {str(candidate.get("description", ""))}
 Stage: {candidate.get("last_funding_round", candidate.get("stage", "unknown"))}
-Total raised: ${safe_float(candidate.get('total_funding_usd', 0)):,.0f}
+Total raised: {raised_line}
 Headcount: {candidate.get("headcount", "unknown")}
-Founded: {candidate.get("founded_date", "unknown")}
+Founded: {founded}
 HQ: {candidate.get("hq_city", "")}, {candidate.get("hq_country", "")}
 Second Layer assessment: {sl_reason}
+
+If information for a factor is genuinely unavailable, score it 5 and note the gap
+in RISKS — do not invent specifics.
 
 Score 1-10 (10=exceptional, 5=average, 1=weak):
 1A. Founder-Market Fit

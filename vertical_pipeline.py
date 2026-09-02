@@ -57,7 +57,7 @@ from vertical_sources import (
     get_scrape_targets, passes_scrape_filter,
 )
 from new_sources import source_yc_launches, source_producthunt, VC_NEWSLETTER_FEEDS
-from contact_enrich import enrich_contact
+from contact_enrich import enrich_contact, scan_site_for_funding
 
 VERTICAL_TAB = "Vertical Pipeline"
 # On-demand runs (INDUSTRY_QUERY set) write here instead, to keep the curated
@@ -241,9 +241,17 @@ _NAME_ONLY_RAISE_RE = re.compile(
 )
 
 
+_GENERIC_NAME = {
+    "our portfolio", "portfolio", "learn more", "read more", "case study",
+    "view all", "see all", "load more", "companies", "our companies", "team",
+    "our team", "about", "about us", "contact", "contact us", "investments",
+    "our investments", "back", "home", "explore", "news", "insights", "the team",
+}
+
+
 def _plausible_company_name(name: str) -> bool:
     name = (name or "").strip()
-    if not name or _HEADLINE_VERB_RE.search(name):
+    if not name or name.lower() in _GENERIC_NAME or _HEADLINE_VERB_RE.search(name):
         return False
     return 1 <= len(name.split()) <= 5
 
@@ -619,7 +627,7 @@ STRICT RULES:
 - If the page lists no companies, return nothing at all.
 
 Return ONE JSON object per line and nothing else:
-{{"name": "...", "website": "https://... or empty", "note": "<=12 words on what they do, or empty"}}
+{{"name": "...", "website": "https://<company's own domain> or empty", "note": "<=12 words on what they do, or empty", "stage": "pre-seed/seed/series a/… ONLY if the page states it, else empty"}}
 
 --- PAGE TEXT ---
 {page_text}"""
@@ -643,12 +651,19 @@ Return ONE JSON object per line and nothing else:
         except json.JSONDecodeError:
             continue
         nm = str(c.get("name", "")).strip()
-        if nm:
-            out.append({
-                "name": nm[:80],
-                "website": str(c.get("website", "") or "").strip()[:300],
-                "note": str(c.get("note", "") or "").strip()[:200],
-            })
+        # Reject reasoning fragments the extractor sometimes emits as a "name"
+        # (e.g. "Diversified Technologies (Frore Systems is not seed — skipping)").
+        if not _plausible_company_name(re.sub(r"\s*\(.*?\)\s*", "", nm)) or "skip" in nm.lower():
+            continue
+        site = str(c.get("website", "") or "").strip()
+        if not site.lower().startswith("http"):
+            site = ""
+        out.append({
+            "name": re.sub(r"\s*\(.*?\)\s*$", "", nm)[:80],
+            "website": site[:300],
+            "note": str(c.get("note", "") or "").strip()[:200],
+            "stage": str(c.get("stage", "") or "").strip().lower()[:20],
+        })
     return out
 
 
@@ -681,7 +696,7 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
             if not ok:
                 print(f"  [scrape] filtered {c['name']}: {reason}")
                 continue
-            new_hits[key] = (c["name"], c["website"], c["note"], url)
+            new_hits[key] = (c["name"], c["website"], c["note"], url, c.get("stage", ""))
 
     print(f"[scrape] {len(new_hits)} new companies after dedup + filter")
 
@@ -691,15 +706,33 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
 
     # Record every selected name as seen BEFORE gating/scoring, so a company that
     # fails downstream isn't re-extracted every run. The seen tab is cheap to prune.
-    _record_scrape_seen(sheet_client, [(n, u, note) for (n, _w, note, u) in selected])
+    _record_scrape_seen(sheet_client, [(n, u, note) for (n, _w, note, u, _s) in selected])
 
-    return [
-        _adapt_extra_record(
-            {"name": n, "url": w or u, "description": note, "source": "V21 Scrape"},
+    out = []
+    for (n, w, note, u, stage) in selected:
+        rec = _adapt_extra_record(
+            # website: the company's OWN site if the extractor found one — never
+            # the fund/portfolio page (u), which would send contact-enrichment to
+            # the fund's inbox.
+            {"name": n, "url": w if w and not _same_host(w, u) else "",
+             "description": note, "source": "Scrape"},
             vertical["name"],
         )
-        for (n, w, note, u) in selected
-    ]
+        rec["_scrape_source_url"] = u
+        if stage:  # portfolio pages often label the round — trust it over the default
+            rec["last_funding_round"] = stage
+        out.append(rec)
+    return out
+
+
+def _same_host(a: str, b: str) -> bool:
+    from urllib.parse import urlparse
+    try:
+        ha = urlparse(a).netloc.lower().removeprefix("www.")
+        hb = urlparse(b).netloc.lower().removeprefix("www.")
+        return bool(ha) and ha == hb
+    except Exception:
+        return False
 
 
 def _record_scrape_seen(sheet_client, rows: list) -> None:
@@ -787,13 +820,23 @@ def _norm_company(name: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", n).strip()
 
 
-def _sec_form_d_lookup(company_name: str, max_filings: int = 5) -> dict:
-    """Look up a company's own Form D filings on EDGAR and sum totalAmountSold.
+# Form D <industryGroupType> values that mean "not an operating tech startup".
+_SEC_NONSTARTUP_INDUSTRY = re.compile(
+    r"pooled investment|real estate|reit|oil (and|&) gas|mining|agriculture|"
+    r"commercial banking|insurance|other banking|other real estate",
+    re.I,
+)
+# Above this, a Form D figure is not a seed signal — treat as unverified.
+_SEC_SANE_MAX = 60_000_000
 
-    STRICT name match only (normalized exact, or exact prefix for multi-word
-    names) and fund/SPV entities are rejected — a wrong figure is worse than
-    none. Returns {} on no confident match, or a dict with total_funding_usd,
-    last_funding_date, source_url, entity_name, n_filings.
+
+def _sec_form_d_lookup(company_name: str, max_filings: int = 6) -> dict:
+    """Look up a company's own Form D filings on EDGAR.
+
+    Uses the MOST RECENT filing's totalAmountSold (not a sum across years —
+    infra companies file many Form Ds for project debt, which summed to "$5.5B").
+    Rejects fund/SPV names, non-startup <industryGroupType>, and figures over
+    $60M (not a seed signal). Returns {} on no confident match.
     """
     q = _norm_company(company_name)
     if len(q) < 4:
@@ -820,8 +863,9 @@ def _sec_form_d_lookup(company_name: str, max_filings: int = 5) -> dict:
     if not matched:
         return {}
 
-    total, dates = 0.0, []
-    for _id, cik, fdate, _display in matched[:max_filings]:
+    # newest filing first
+    matched.sort(key=lambda t: t[2] or "", reverse=True)
+    for _id, cik, fdate, display in matched[:max_filings]:
         if not cik or ":" not in _id:
             continue
         acc = _id.split(":")[0].replace("-", "")
@@ -832,23 +876,26 @@ def _sec_form_d_lookup(company_name: str, max_filings: int = 5) -> dict:
             ).text
         except Exception:
             continue
-        m = re.search(r"<totalAmountSold>(\d+)</totalAmountSold>", xml)
-        if m:
-            total += float(m.group(1))
-        if fdate:
-            dates.append(fdate)
         time.sleep(0.2)  # SEC politeness
 
-    if total <= 0:
-        return {}
-    cik0 = int(matched[0][1])
-    return {
-        "total_funding_usd": int(total),
-        "last_funding_date": max(dates) if dates else "",
-        "source_url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik0:010d}&type=D",
-        "entity_name": re.sub(r"\s*\(CIK.*?\)", "", matched[0][3]).strip(),
-        "n_filings": len(matched),
-    }
+        ig = re.search(r"<industryGroupType>([^<]+)</industryGroupType>", xml)
+        if ig and _SEC_NONSTARTUP_INDUSTRY.search(ig.group(1)):
+            return {}  # a fund / REIT / oil&gas entity slipped the name filter
+        m = re.search(r"<totalAmountSold>(\d+)</totalAmountSold>", xml)
+        if not m:
+            continue
+        amount = float(m.group(1))
+        if amount <= 0 or amount > _SEC_SANE_MAX:
+            return {}  # not a seed-scale figure — don't trust it
+        cik0 = int(cik)
+        return {
+            "total_funding_usd": int(amount),
+            "last_funding_date": fdate or "",
+            "source_url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik0:010d}&type=D",
+            "entity_name": re.sub(r"\s*\(CIK.*?\)", "", display).strip(),
+            "n_filings": len(matched),
+        }
+    return {}
 
 
 def verify_zero_funding(ai_client, candidates: list) -> None:
@@ -920,99 +967,100 @@ def verify_zero_funding(ai_client, candidates: list) -> None:
     if sec_hits:
         print(f"[Funding verify] SEC Form D: {sec_hits} verified")
 
+    # ----- Pass 1c: the company's own site ("we raised $Xm seed round") -----
+    site_hits = 0
+    after_site = []
+    for c in still_unknown:
+        site = str(c.get("website", "") or "")
+        fx = scan_site_for_funding(site) if site else {}
+        if fx:
+            c["total_funding_usd"] = fx["amount_usd"]
+            c["_funding_confidence"] = "medium"
+            c["_funding_source"] = fx["source_url"]
+            c["_funding_unverified"] = False
+            if fx.get("round_type"):
+                c["last_funding_round"] = fx["round_type"]
+            c["_funding_checks"].append(f"company site: ${fx['amount_usd']:,.0f} — {fx['source_url']}")
+            site_hits += 1
+        else:
+            after_site.append(c)
+    still_unknown = after_site
+    if site_hits:
+        print(f"[Funding verify] Company site: {site_hits} verified")
+
     if not still_unknown:
         return
 
-    # ----- Pass 2: Claude verification with strict source-citation rule -----
-    names = [c["name"] for c in still_unknown][:40]
-    for c in still_unknown[40:]:
-        c["_funding_checks"].append("claude: skipped (per-run batch cap)")
-    prompt = f"""You are verifying funding and team data for the seed-stage startups below.
-DO NOT estimate. DO NOT extrapolate from similar companies. DO NOT use general knowledge.
-DO NOT fabricate founder names — this is a CRITICAL anti-hallucination rule.
-Only return data you can cite a specific source for.
+    # ----- Pass 2: Claude verification, chunked (a single 40-company call at
+    # max_tokens=2000 truncated its own JSON and lost the whole batch) -----
+    total_updated = total_unverified = 0
+    for i in range(0, len(still_unknown), 10):
+        chunk = still_unknown[i:i + 10]
+        u, n = _claude_verify_chunk(ai_client, chunk)
+        total_updated += u
+        total_unverified += n
+    print(f"[Funding verify] Claude: {total_updated} verified, {total_unverified} unverified")
 
-EXAMPLES OF PROHIBITED FABRICATION:
-- Inventing plausible-sounding co-founder names (e.g. "Eric Ness" when the actual co-founder is "Eric Ryan")
-- Inventing founder backgrounds (e.g. "ex-AWS/Capgemini" when actually ex-Google/Microsoft)
-- Completing the pattern of a founder bio when source data is thin
-- Pattern-matching common Silicon Valley names ("Smith, Chen, Patel, etc.")
+    _finalize_unverified(still_unknown)
 
-If you do not know a founder's name or background from a specific source you can cite,
-return null. NEVER guess. NEVER fabricate.
 
-For each company, return JSON with these fields:
-- total_funding_usd: integer dollar amount, ONLY if you can cite a specific source. Otherwise null.
-- last_round_type: the EXACT round name as reported (Pre-seed / Seed / Seed Extension / Series A / Series B / Grant / etc.). Otherwise null.
-- last_funding_date: YYYY-MM-DD format if known, otherwise null.
-- founded_year: YYYY if known from a specific source, otherwise null.
-- founders: array of objects [{{"name": "Full Name", "role": "CEO/CTO/etc.", "background_source": "URL or citation"}}] — ONLY include founders you can verify by name and role from a specific source. If any founder name is uncertain, OMIT THEM ENTIRELY rather than guessing. Empty array if no founders can be verified.
-- source_citation: URL or specific reference (e.g. "TechCrunch Jun 2024 announcement", "SEC Form D filed 2024-03-15", "Crunchbase profile").
-- confidence: "high" (multiple primary sources agree), "medium" (single primary source like a press release or SEC filing), "low" (general knowledge only, NO specific source), or "unverified" (cannot find).
+def _claude_verify_chunk(ai_client, chunk: list) -> tuple:
+    """Verify one small batch. Slim response (no founders array — score_candidate
+    handles founders) so the JSON never truncates. Returns (updated, unverified)."""
+    names = [c["name"] for c in chunk]
+    prompt = f"""Verify the most recent funding round for each seed-stage startup below.
+DO NOT estimate, extrapolate, or use vague general knowledge. Return a figure
+ONLY if you can name a specific source (press release, SEC filing, Crunchbase,
+the company's own site). Otherwise null.
 
-CRITICAL: If confidence would be "low" or "unverified", set total_funding_usd to null AND founders to [].
-Better to return null and empty than to estimate or fabricate.
+For each company return JSON:
+{{"total_funding_usd": int or null, "last_round_type": "Pre-seed/Seed/Series A/Grant/…" or null,
+  "last_funding_date": "YYYY-MM-DD" or null, "founded_year": "YYYY" or null,
+  "source_citation": "URL or specific reference" or null,
+  "confidence": "high" | "medium" | "low" | "unverified"}}
+
+If confidence is "low" or "unverified", total_funding_usd MUST be null.
 
 Companies: {json.dumps(names)}
 
-Return ONLY a JSON object mapping company name to the fields above. No preamble."""
+Return ONLY a JSON object mapping each company name to its fields. No preamble."""
     try:
         resp = ai_client.messages.create(
-            model=MODEL, max_tokens=2000,
+            model=MODEL, max_tokens=1600,
             messages=[{"role": "user", "content": prompt}],
         )
-        verified = json.loads(resp.content[0].text.strip())
-        updated = 0
-        unverified_count = 0
-        for c in still_unknown:
-            info = verified.get(c["name"], {})
-            if not info:
-                c["_funding_checks"].append("claude: no response for this company")
-                unverified_count += 1
-                continue
-            confidence = (info.get("confidence") or "").lower()
-            if confidence in ("low", "unverified") or info.get("total_funding_usd") is None:
-                c["_funding_confidence"] = confidence or "unverified"
-                c["_funding_checks"].append("claude: no citable source")
-                unverified_count += 1
-                continue
-            if info.get("total_funding_usd") is not None:
-                c["total_funding_usd"] = info["total_funding_usd"]
-                c["_funding_unverified"] = False  # cleared: cited source provided
-                c["_funding_checks"].append(
-                    f"claude: ${info['total_funding_usd']:,.0f} — {info.get('source_citation') or 'cited'}"
-                )
-                updated += 1
-            if info.get("last_round_type"):
-                c["last_funding_round"] = info["last_round_type"]
-                c["last_round_type"] = info["last_round_type"]
-            if info.get("last_funding_date"):
-                c["last_funding_date"] = info["last_funding_date"]
-            if info.get("founded_year"):
-                c["founded_year"] = info["founded_year"]
-            # Founders: overwrite ONLY if Claude returned verified founders with citations.
-            # If founders array is empty or missing, leave existing data alone (don't blank it out).
-            founders_list = info.get("founders") or []
-            if founders_list and isinstance(founders_list, list):
-                # Format as readable string for sheet column; preserve source citations
-                founder_str = "; ".join(
-                    f"{f.get('name', '?')} ({f.get('role', 'co-founder')})"
-                    for f in founders_list if f.get("name")
-                )
-                if founder_str:
-                    c["founders"] = founder_str
-                    c["_founders_verified"] = True
-                    c["_founders_sources"] = [f.get("background_source", "") for f in founders_list]
-            c["_funding_confidence"] = confidence or "medium"
-            c["_funding_source"] = info.get("source_citation") or "Claude verified"
-        print(f"[Funding verify] Claude: {updated} verified, {unverified_count} flagged as unverified")
+        text = resp.content[0].text.strip()
+        text = text[text.find("{"):text.rfind("}") + 1] if "{" in text else text
+        verified = json.loads(text)
     except Exception as e:
-        record_llm_error("funding verification pass", e)
-        for c in still_unknown:
-            c["_funding_checks"].append("claude: verification pass errored")
-        print("[Funding verify] proceeding with pre-verification data for this batch")
+        record_llm_error(f"funding verification chunk ({names[0]}…)", e)
+        for c in chunk:
+            c["_funding_checks"].append("claude: verification errored")
+        return 0, len(chunk)
 
-    _finalize_unverified(still_unknown)
+    updated = unverified = 0
+    for c in chunk:
+        info = verified.get(c["name"]) or {}
+        conf = (info.get("confidence") or "").lower()
+        amt = info.get("total_funding_usd")
+        if not info or conf in ("low", "unverified") or amt is None:
+            c["_funding_confidence"] = conf or "unverified"
+            c["_funding_checks"].append("claude: no citable source")
+            unverified += 1
+            continue
+        c["total_funding_usd"] = amt
+        c["_funding_unverified"] = False
+        c["_funding_confidence"] = conf or "medium"
+        c["_funding_source"] = info.get("source_citation") or "Claude verified"
+        c["_funding_checks"].append(f"claude: ${amt:,.0f} — {info.get('source_citation') or 'cited'}")
+        if info.get("last_round_type"):
+            c["last_funding_round"] = info["last_round_type"]
+        if info.get("last_funding_date"):
+            c["last_funding_date"] = info["last_funding_date"]
+        if info.get("founded_year"):
+            c["founded_year"] = info["founded_year"]
+        updated += 1
+    return updated, unverified
 
 
 def _finalize_unverified(candidates: list) -> None:
@@ -1031,13 +1079,16 @@ def _finalize_unverified(candidates: list) -> None:
 # Dedup
 # ============================================================================
 def deduplicate(candidates: list, existing_names: set) -> list:
-    seen = set(existing_names)
+    """Dedup on the normalized company name (strips Inc/LLC/punctuation) so
+    'Pearl Street' / 'Pearl Street Technologies, Inc.' collapse to one."""
+    seen = {_norm_company(n) for n in existing_names if n}
     unique = []
     for c in candidates:
-        name = str(c.get("name", "")).strip().lower()
-        if not name or name in seen:
+        raw = str(c.get("name", "")).strip()
+        key = _norm_company(raw)
+        if not key or key in seen:
             continue
-        seen.add(name)
+        seen.add(key)
         unique.append(c)
     return unique
 
@@ -1219,10 +1270,21 @@ def main():
         print("[scrape] skipped (SCRAPE_LAYER=0)")
     print(f"\nTotal raw: {len(candidates)}")
 
+    # Step 1a: Dedup FIRST — don't spend funding-verification / scoring calls on
+    # the same company sourced 2-3 ways.
+    existing = read_existing_names(sheet_client, target_tab)
+    candidates = deduplicate(candidates, existing)
+    print(f"After dedup: {len(candidates)}")
+
     # Step 1b: Verify funding for $0 candidates before gating
     print("\nSTEP 1b: Verifying zero-funding candidates")
     print("-" * 60)
     verify_zero_funding(ai_client, candidates)
+    # Enrichment writes the founding year to `founded_year`; the age gate and the
+    # scorer read `founded_date`. Fold it over so the enriched value is used.
+    for c in candidates:
+        if not c.get("founded_date") and c.get("founded_year"):
+            c["founded_date"] = str(c["founded_year"])
 
     # Step 1c: Confirm funding figures are internally consistent (cross-source
     # agreement, stage/amount plausibility, staleness). Downgrades or clears
@@ -1237,11 +1299,6 @@ def main():
             print(f"  {verdict}: {c.get('name', '?')} — {note}")
     print(f"Confirmed: {len(candidates) - sum(_fc.values())} clean, " +
           (", ".join(f"{n}×{v}" for v, n in _fc.items()) if _fc else "0 flagged"))
-
-    # Step 2: Dedup
-    existing = read_existing_names(sheet_client, target_tab)
-    candidates = deduplicate(candidates, existing)
-    print(f"After dedup: {len(candidates)}")
 
     # Step 3: Three hard gates
     print(f"\nSTEP 2: Three hard gates")

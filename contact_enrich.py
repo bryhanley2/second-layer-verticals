@@ -146,3 +146,46 @@ def enrich_contact(candidate: dict, timeout: int = 12, max_pages: int = 4) -> di
         result["note"] = f"no public email on {pages_fetched} page(s) checked — use the site's contact form"
 
     return result
+
+
+# --- Funding-announcement scan (the company's own site) -----------------------
+_FUNDING_PATHS = ["", "/news", "/blog", "/press", "/about", "/company"]
+_RAISE_RE = re.compile(
+    r"(?:raised|closed|secured|announced|completed)\s+(?:a\s+|an\s+|its\s+)?"
+    r"\$\s?([\d]+(?:\.\d+)?)\s?(million|billion|m\b|bn\b|k\b)",
+    re.I,
+)
+_ROUND_RE = re.compile(
+    r"\b(pre[- ]?seed|seed(?:\s+extension)?|series\s+[a-d]|angel|grant)\b", re.I,
+)
+
+
+def scan_site_for_funding(website: str, timeout: int = 10, max_pages: int = 4) -> dict:
+    """Look for 'raised $X seed round' language on the company's own site.
+    Returns {amount_usd, round_type, source_url} or {} — a real, citable,
+    zero-cost signal for companies that announce their own rounds."""
+    if not website or not website.lower().startswith("http") or not _looks_like_real_site(website):
+        return {}
+    for path in _FUNDING_PATHS[:max_pages]:
+        html = _fetch(urljoin(website, path) if path else website, timeout)
+        if not html:
+            continue
+        text = re.sub(r"<[^>]+>", " ", html)
+        m = _RAISE_RE.search(text)
+        if not m:
+            continue
+        n = float(m.group(1))
+        unit = m.group(2).lower()
+        mult = {"billion": 1e9, "bn": 1e9, "million": 1e6, "m": 1e6, "k": 1e3}.get(unit, 1e6)
+        amount = int(n * mult)
+        if amount < 100_000 or amount > 60_000_000:
+            continue  # not a seed-scale, citable figure
+        window = text[max(0, m.start() - 200): m.end() + 200]
+        rd = _ROUND_RE.search(window)
+        return {
+            "amount_usd": amount,
+            "round_type": (rd.group(1).title() if rd else ""),
+            "source_url": urljoin(website, path) if path else website,
+        }
+        time.sleep(0.2)
+    return {}
