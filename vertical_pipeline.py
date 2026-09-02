@@ -416,6 +416,20 @@ is real, skip it entirely. Return ONLY JSON lines, nothing else."""
                     continue
                 try:
                     c = json.loads(line)
+                    nm = str(c.get("name", "")).strip()
+                    # Claude annotates some lines ("... - skipping", "not seed")
+                    # or invents thin one-word names — drop those here.
+                    if (not _plausible_company_name(re.sub(r"\s*\(.*?\)\s*", "", nm))
+                            or any(w in nm.lower() for w in ("skip", "not seed", "n/a", "unknown", "example"))
+                            or len(nm) < 3):
+                        continue
+                    # Require a real-looking website — hallucinated companies
+                    # usually have a blank or non-domain "website".
+                    site = str(c.get("website", "") or "").strip()
+                    if not re.match(r"^(https?://)?[a-z0-9-]+\.[a-z]{2,}", site, re.I):
+                        continue
+                    c["website"] = site if site.startswith("http") else "https://" + site
+                    c["name"] = re.sub(r"\s*\(.*?\)\s*$", "", nm)[:80]
                     # Force funding to null/0 so the verification pass MUST populate it.
                     # Never trust a funding figure that came from the sourcing prompt.
                     c["total_funding_usd"] = 0
