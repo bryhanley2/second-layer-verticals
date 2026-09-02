@@ -645,6 +645,9 @@ STRICT RULES:
   fund/investor names, report titles, and generic phrases ("Our Portfolio",
   "Learn more", "Read the case study").
 - Use ONLY names present in the text below. Do not infer or invent companies.
+- For "website": look in the "LINKS ON PAGE" section for a link whose text is
+  the company name or whose domain matches it, and return that URL. Never
+  return the fund's / this page's own domain. Empty if not found.
 - If the page lists no companies, return nothing at all.
 
 Return ONE JSON object per line and nothing else:
@@ -728,7 +731,8 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
             if not ok:
                 print(f"  [scrape] filtered {c['name']}: {reason}")
                 continue
-            new_hits[key] = (c["name"], c.get("website", ""), c.get("note", ""), url, c.get("stage", ""))
+            site = c.get("website", "") or _match_website_from_links(c["name"], page_text)
+            new_hits[key] = (c["name"], site, c.get("note", ""), url, c.get("stage", ""))
 
     if cached_pages:
         print(f"[scrape] {cached_pages} unchanged page(s) reused from cache (no extraction cost)")
@@ -765,6 +769,30 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
     return out
 
 
+def _match_website_from_links(name: str, page_text: str) -> str:
+    """Pull the company's own URL from the page's 'LINKS ON PAGE' section
+    ('CompanyName -> https://…') when the extractor didn't return one."""
+    if "LINKS ON PAGE:" not in page_text:
+        return ""
+    nkey = _norm_company(name)
+    if not nkey:
+        return ""
+    for ln in page_text.split("LINKS ON PAGE:", 1)[1].splitlines():
+        if " -> " not in ln:
+            continue
+        text, _, href = ln.partition(" -> ")
+        href = href.strip()
+        if not href.lower().startswith("http"):
+            continue
+        host = href.split("//", 1)[-1].split("/", 1)[0].lower().removeprefix("www.")
+        # link text matches the company, or the domain contains the name
+        if _norm_company(text) == nkey or nkey.replace(" ", "") in host.replace("-", "").replace(".", ""):
+            # skip links back to the fund/aggregator itself
+            if not any(s in host for s in ("linkedin", "twitter", "crunchbase", "youtube", "medium")):
+                return href
+    return ""
+
+
 def _same_host(a: str, b: str) -> bool:
     from urllib.parse import urlparse
     try:
@@ -777,6 +805,20 @@ def _same_host(a: str, b: str) -> bool:
 
 _SCRAPE_STATE_HEADERS = ["Company", "First Seen", "Source URL", "Note", "Status"]
 _SCRAPE_CACHE_TAB = "Scrape Cache"
+
+
+def _scrape_state_tab(sheet_client):
+    """Get the Scrape Seen tab, migrating a pre-Status (4-column) tab in place."""
+    tab = ensure_tab(sheet_client, SCRAPE_STATE_TAB,
+                     headers=_SCRAPE_STATE_HEADERS, rows=5000, cols=6)
+    try:
+        if tab.col_count < len(_SCRAPE_STATE_HEADERS):
+            tab.resize(rows=max(tab.row_count, 5000), cols=len(_SCRAPE_STATE_HEADERS) + 1)
+        if (tab.row_values(1) or [])[:5] != _SCRAPE_STATE_HEADERS:
+            tab.update(range_name="A1:E1", values=[_SCRAPE_STATE_HEADERS])
+    except Exception as e:
+        print(f"[scrape] Scrape Seen migration warning: {e}")
+    return tab
 
 
 def _load_scrape_cache(sheet_client) -> dict:
@@ -853,11 +895,7 @@ def _record_scrape_seen(sheet_client, rows: list) -> None:
     if not rows:
         return
     try:
-        tab = ensure_tab(sheet_client, SCRAPE_STATE_TAB,
-                         headers=_SCRAPE_STATE_HEADERS, rows=5000, cols=5)
-        # migrate a pre-Status tab so appended 5-col rows are readable
-        if (tab.row_values(1) or [])[:5] != _SCRAPE_STATE_HEADERS:
-            tab.update("A1:E1", [_SCRAPE_STATE_HEADERS])
+        tab = _scrape_state_tab(sheet_client)
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         tab.append_rows([[n, now, u, note, "pending"] for (n, u, note) in rows])
         print(f"[scrape] recorded {len(rows)} new names to '{SCRAPE_STATE_TAB}'")
@@ -876,7 +914,7 @@ def _resolve_scrape_seen(sheet_client, state: dict, done_norms: set) -> None:
     if not updates:
         return
     try:
-        sheet_client.open_by_key(SHEET_ID).worksheet(SCRAPE_STATE_TAB).batch_update(updates)
+        _scrape_state_tab(sheet_client).batch_update(updates)
         print(f"[scrape] resolved {len(updates)} names to 'done' in '{SCRAPE_STATE_TAB}'")
     except Exception as e:
         print(f"[scrape] could not resolve '{SCRAPE_STATE_TAB}': {e}")

@@ -444,20 +444,36 @@ Founded: {founded}
 HQ: {candidate.get("hq_city", "")}, {candidate.get("hq_country", "")}
 Second Layer assessment: {sl_reason}{site_block}
 
-If information for a factor is genuinely unavailable, score it 5 and note the gap
-in RISKS — do not invent specifics. Use the website text above for traction
-(named customers/pilots), product depth, and team signals when present.
+Score each factor 1-10 using the anchors. If the evidence for a factor is
+genuinely missing, score it 4 (not 5) and say so in RISKS — thin data is a real
+negative at seed, not a neutral. Do not invent specifics. Use the website text
+above for traction, product depth, and team signals.
 
-Score 1-10 (10=exceptional, 5=average, 1=weak):
-1A. Founder-Market Fit
-1B. Tech Differentiation
-1C. Founder Commitment
-2A. Product-Market Fit
-3A. Market Size (TAM >$1B for max)
-3B. Timing (tailwinds)
-5. Traction Quality (named pilots/contracts)
-6. Capital Efficiency (right burn for stage)
-7. Investor Signal
+1A. Founder-Market Fit — 9: founder built/operated the exact system this
+   replaces, or is a recognized authority in the domain. 6: adjacent-domain
+   operator or strong technical background in the space. 3: no stated relevant
+   background. 1: background contradicts the problem.
+1B. Tech Differentiation — 9: defensible technical moat (proprietary data,
+   hard integration, novel method) clearly described. 6: solid product, some
+   differentiation but replicable. 3: thin wrapper / obvious approach.
+1C. Founder Commitment — 9: full-time, second-time founder or left a senior
+   role for this. 6: full-time, first-time. 3: unclear / side project signals.
+2A. Product-Market Fit — 9: named paying customers or a waitlist/pipeline
+   described on the site. 6: live product, design partners, early usage. 3:
+   pre-product or vague "working with teams". 1: idea stage.
+3A. Market Size — 9: clear >$1B TAM driven by a regulatory/structural mandate.
+   6: solid >$1B but discretionary or fragmented. 3: niche / <$500M.
+3B. Timing — 9: a specific mandate, deadline, or structural shift makes this
+   urgent NOW (name it). 6: strong tailwind, no hard catalyst. 3: "someday".
+5. Traction Quality — 9: named enterprise pilots/contracts or revenue on the
+   site. 6: LOIs, design partners, or a notable logo. 3: none stated. 1: none
+   and pre-product.
+6. Capital Efficiency — 9: meaningful traction on <$3M or a lean team for the
+   stage. 6: normal seed burn. 3: large raise / headcount with little to show.
+   Score 5 if funding is undisclosed and headcount is unknown.
+7. Investor Signal — 9: a top specialist fund led (name it). 6: a known seed
+   fund or strong accelerator. 3: unknown or unstated. Score 4 if no investor
+   information is available.
 
 Format EXACTLY:
 1A:N
@@ -494,9 +510,9 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
             if key in {"1A", "1B", "1C", "2A", "3A", "3B", "5", "6", "7"}:
                 try:
                     digits = ''.join(c for c in val if c.isdigit())[:2]
-                    scores[key] = int(digits) if digits else 5
+                    scores[key] = max(1, min(10, int(digits))) if digits else 4
                 except ValueError:
-                    scores[key] = 5
+                    scores[key] = 4
             elif key.upper() == "SUMMARY":
                 meta["summary"] = val
             elif key.upper() == "STRENGTHS":
@@ -506,10 +522,17 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
             elif key.upper() == "FOUNDERS":
                 meta["founders"] = val
 
+        parsed = len(scores)
         weighted = 0.0
         for factor, weight in FACTOR_WEIGHTS.items():
-            weighted += scores.get(factor, 5) * weight
+            weighted += scores.get(factor, 4) * weight
         pct = round(weighted * 10, 1)
+        if parsed < 7:  # the model didn't return most factors — don't trust the number
+            record_llm_error(
+                f"9-factor scoring for {candidate.get('name')}",
+                ValueError(f"only {parsed}/9 factors parsed"),
+            )
+            pct = 0.0
 
         return {
             "scores": scores,
