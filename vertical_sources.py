@@ -20,6 +20,12 @@ _COMMON_SCRAPE_REJECTS = [
     "publicly traded", "(nasdaq:", "(nyse:", "shut down", "ceased operations",
     "wound down", "law firm", "consulting firm", "trade association",
     "portfolio company of", "our fund", "spv",
+    # not an operating company
+    "partnership intermediary", "federal program", "program office",
+    "runs a federal", "manages the federal", "industry consortium",
+    "standards body", "national laboratory", "government agency",
+    "501(c)", "501c3", "nonprofit organization", "non-profit organization",
+    "trade body", "membership organization",
 ]
 # Reusable per-group lists, attached to specific verticals below.
 SCRAPE_REJECTS_HARDWARE = [
