@@ -732,9 +732,19 @@ def source_vertical_scrape(ai_client, sheet_client, vertical: dict) -> list:
         else:
             companies = _extract_companies_from_page(ai_client, url, page_text, vertical)
             cache_updates[url] = (h, companies)
+        host = url.split("//", 1)[-1].split("/", 1)[0].lower().removeprefix("www.")
+        host_key = _norm_company(host.split(".")[0])
         for c in companies:
             key = _norm_company(c["name"])
             if not key or key in blocked or key in new_hits:
+                continue
+            # The extractor sometimes returns the ENTITY that runs the page
+            # (connectwerx from connectwerx.org). That's not a portfolio company —
+            # it's a fund/program/intermediary. Skip it, and remember it as a
+            # possible new scrape target.
+            if host_key and (key == host_key or key.replace(" ", "") == host_key.replace(" ", "")):
+                _log_scrape_target_idea(sheet_client, c["name"], f"https://{host}",
+                                        f"operates {url} — not a portfolio company")
                 continue
             ok, reason = passes_scrape_filter(f"{c['name']} {c.get('note', '')}", vertical)
             if not ok:
@@ -814,6 +824,28 @@ def _same_host(a: str, b: str) -> bool:
 
 _SCRAPE_STATE_HEADERS = ["Company", "First Seen", "Source URL", "Note", "Status"]
 _SCRAPE_CACHE_TAB = "Scrape Cache"
+_TARGET_IDEAS_TAB = "Scrape Target Ideas"
+
+
+def _log_scrape_target_idea(sheet_client, name: str, url: str, reason: str) -> None:
+    """A fund / accelerator / program the pipeline rejected as 'not a company'
+    but that might be worth adding to a vertical's scrape_targets. Deduped by
+    name; you review and promote the good ones into vertical_sources.py."""
+    name = (name or "").strip()
+    if not name:
+        return
+    try:
+        tab = ensure_tab(sheet_client, _TARGET_IDEAS_TAB,
+                         headers=["Entity", "Guessed URL", "Reason", "First Seen"],
+                         rows=1000, cols=4)
+        seen = {str(r.get("Entity", "")).strip().lower() for r in tab.get_all_records()}
+        if name.lower() in seen:
+            return
+        tab.append_row([name, url, reason,
+                        datetime.now(timezone.utc).strftime("%Y-%m-%d")])
+        print(f"  [scrape] logged '{name}' as a scrape-target idea")
+    except Exception as e:
+        print(f"  [scrape] could not log target idea: {e}")
 
 
 def _scrape_state_tab(sheet_client):
@@ -1571,6 +1603,14 @@ def main():
                 sl_score, sl_reason = evaluate_consumer_second_layer_fit(ai_client, c)
             else:
                 sl_score, sl_reason = evaluate_second_layer_fit(ai_client, c)
+            if sl_score == 0 or "NOT-A-COMPANY" in str(sl_reason).upper():
+                print(f"  not a company: {c.get('name', '?')} — {sl_reason}")
+                if c.get("_from_scrape"):
+                    scrape_done.add(_norm_company(c.get("name", "")))
+                _log_scrape_target_idea(sheet_client, c.get("name", ""),
+                                        c.get("website", "") or c.get("_scrape_source_url", ""),
+                                        f"Second Layer eval: {sl_reason}")
+                continue
             if sl_score < 2:
                 continue
             c["_sl_reason"] = sl_reason

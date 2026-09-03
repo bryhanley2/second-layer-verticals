@@ -398,7 +398,12 @@ Company: {candidate.get("name")}
 Description: {str(candidate.get("description", ""))[:800]}
 Industry: {candidate.get("industry", "")}
 
-Rate 1-3:
+FIRST: is this an operating, venture-backable company? Answer NO if it is a
+venture fund, accelerator/incubator, government program or office, partnership
+intermediary, nonprofit, industry association/consortium, standards body, or
+research lab. If NO, respond with exactly: 0|NOT-A-COMPANY: <what it is>
+
+Otherwise rate 1-3:
 1 = Fails (IS the trend itself)
 2 = Borderline/unclear
 3 = Strong Second Layer fit
@@ -412,6 +417,8 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text.strip()
+        if text.lstrip().startswith("0") or "NOT-A-COMPANY" in text.upper():
+            return 0, text.split("|", 1)[-1].strip()[:120] or "not an operating company"
         # Claude sometimes prefixes "SCORE: 3 | ..." or "Score|..." — pull the
         # first 1-3 digit in the text rather than assuming position 0.
         m = re.search(r"[123]", text)

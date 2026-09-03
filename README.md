@@ -256,6 +256,8 @@ All three must pass or the company is excluded:
 | Pipeline Archive | Historical pipeline runs |
 | Company Pipeline | Extended company tracking |
 | Scrape Seen | Run-over-run state for the scrape layer (auto-created) |
+| Scrape Cache | Page-content hash + last extraction per scrape target (auto-created) |
+| Scrape Target Ideas | Funds / accelerators / programs rejected as "not a company" — review and promote good ones into `vertical_sources.py` (auto-created) |
 | Empty (copy paste) | Template tab |
 
 ### Pipeline Headers (26 columns)
