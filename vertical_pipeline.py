@@ -45,6 +45,7 @@ import hashlib
 from datetime import datetime, timezone, timedelta
 import requests
 import feedparser
+from urllib.parse import urljoin
 from pipeline_utils import (
     get_sheet_client, get_anthropic_client, SHEET_ID, MODEL, MODEL_EXTRACT,
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
@@ -113,6 +114,31 @@ except ValueError:
 # Recent YC batches considered "early enough" for the stage gate.
 # Adjust as new batches are announced.
 RECENT_YC_BATCHES = {"W23", "S23", "W24", "S24", "F24", "W25", "S25", "F25", "X25", "W26", "S26"}
+
+# ---- Watchlist: track "not yet, but watching" companies across runs ----------
+# Companies that clear the thesis filter but score below MIN_SCORE_PCT (WATCH /
+# BACKLOG tiers — interesting, not yet conviction) are added to the "Watchlist"
+# tab. Every run re-checks the due ones for MOVEMENT: a new SEC Form D, a funding
+# line on their own site, a homepage/careers change, fresh press. The
+# deterministic checks are free; a single Claude web-search call fires ONLY when
+# a signal actually hits. Add rows by hand (Company + Website, Source "manual")
+# to track anything else. Set WATCHLIST=0 to skip the whole step.
+WATCHLIST_ENABLED = (os.environ.get("WATCHLIST") or "1").strip() != "0"
+WATCHLIST_TAB = "Watchlist"
+_WATCHLIST_CACHE_TAB = "Watchlist Cache"
+_WATCHLIST_HEADERS = [
+    "Company", "Website", "Vertical", "Added", "Source",
+    "Last Score", "Last Stage", "Last Funding",
+    "Last Checked", "Last Signal", "Status", "Notes",
+]
+try:
+    WATCHLIST_RECHECK_DAYS = int(os.environ.get("WATCHLIST_RECHECK_DAYS") or "20")
+except ValueError:
+    WATCHLIST_RECHECK_DAYS = 20
+try:
+    WATCHLIST_MAX_CHECK = int(os.environ.get("WATCHLIST_MAX_CHECK") or "40")
+except ValueError:
+    WATCHLIST_MAX_CHECK = 40
 
 
 # ============================================================================
@@ -962,6 +988,327 @@ def _resolve_scrape_seen(sheet_client, state: dict, done_norms: set) -> None:
 
 
 # ============================================================================
+# Watchlist — longitudinal tracking of "not yet, but watching" companies
+# ============================================================================
+_JOBISH_RE = re.compile(
+    r"(apply now|view (?:job|role|position|opening)|open (?:roles|positions)|"
+    r"greenhouse\.io|boards\.greenhouse|lever\.co|jobs\.lever|ashbyhq\.com|"
+    r"job-boards|workable\.com|/careers/|/jobs/)",
+    re.I,
+)
+_CAREERS_PATHS = ["/careers", "/jobs", "/join", "/company/careers", "/about/careers", "/careers/"]
+_WL_MONEY_RE = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)\s*([mMbBkK])?")
+
+
+def _dollars(s) -> float:
+    """Best-effort USD from a 'Last Funding' cell like '$2,500,000 as of … — crunchbase'."""
+    m = _WL_MONEY_RE.search(str(s or ""))
+    if not m:
+        return 0.0
+    try:
+        n = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return 0.0
+    unit = (m.group(2) or "").lower()
+    if unit:
+        return n * {"k": 1e3, "m": 1e6, "b": 1e9}[unit]
+    return n  # already a full figure ("$2,500,000")
+
+
+def _watchlist_tab(sheet_client):
+    return ensure_tab(sheet_client, WATCHLIST_TAB, headers=_WATCHLIST_HEADERS,
+                      rows=2000, cols=len(_WATCHLIST_HEADERS) + 1)
+
+
+def _load_watchlist(sheet_client) -> list:
+    try:
+        tab = sheet_client.open_by_key(SHEET_ID).worksheet(WATCHLIST_TAB)
+        recs = tab.get_all_records()
+    except Exception:
+        return []
+    out = []
+    for i, r in enumerate(recs, start=2):  # row 1 is the header
+        if str(r.get("Company", "")).strip():
+            r["_row"] = i
+            out.append(r)
+    return out
+
+
+def _load_watchlist_cache(sheet_client) -> dict:
+    """{norm_name: (homepage_hash, job_signal_count)}."""
+    try:
+        tab = sheet_client.open_by_key(SHEET_ID).worksheet(_WATCHLIST_CACHE_TAB)
+        rows = tab.get_all_records()
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        nm = _norm_company(str(r.get("Company", "")))
+        if not nm:
+            continue
+        try:
+            jobs = int(r.get("Jobs") or 0)
+        except (ValueError, TypeError):
+            jobs = 0
+        out[nm] = (str(r.get("Hash", "")).strip(), jobs)
+    return out
+
+
+def _save_watchlist_cache(sheet_client, updates: dict) -> None:
+    if not updates:
+        return
+    try:
+        tab = ensure_tab(sheet_client, _WATCHLIST_CACHE_TAB,
+                         headers=["Company", "Hash", "Jobs", "Updated"], rows=2000, cols=4)
+        existing = {_norm_company(str(r.get("Company", ""))): r for r in tab.get_all_records()}
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for nm, (h, jobs) in updates.items():
+            existing[nm] = {"Company": nm, "Hash": h, "Jobs": jobs, "Updated": now}
+        tab.clear()
+        tab.append_row(["Company", "Hash", "Jobs", "Updated"])
+        tab.append_rows([[r["Company"], r["Hash"], r["Jobs"], r["Updated"]]
+                         for r in existing.values()])
+    except Exception as e:
+        print(f"[watchlist] could not update cache: {e}")
+
+
+def add_to_watchlist(sheet_client, scored: list, vertical_label: str = "") -> None:
+    """Auto-add this run's thesis-fit-but-not-yet-conviction companies (scored
+    below MIN_SCORE_PCT) so they're tracked for movement over time."""
+    if not WATCHLIST_ENABLED or not scored:
+        return
+    try:
+        tab = _watchlist_tab(sheet_client)
+        seen = {_norm_company(str(r.get("Company", ""))) for r in tab.get_all_records()}
+    except Exception as e:
+        print(f"[watchlist] could not open tab: {e}")
+        return
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = []
+    for s in scored:
+        if safe_float(s.get("weighted_pct", 0)) >= MIN_SCORE_PCT:
+            continue  # a real recommendation — it goes in the pipeline, not the watchlist
+        cand = s["candidate"]
+        nm = str(cand.get("name", "")).strip()
+        norm = _norm_company(nm)
+        if not nm or norm in seen:
+            continue
+        seen.add(norm)
+        rows.append([
+            nm, cand.get("website", ""),
+            vertical_label or cand.get("industry", ""),
+            now, "pipeline",
+            f"{safe_float(s.get('weighted_pct', 0)):.0f}",
+            cand.get("last_funding_round", cand.get("stage", "")),
+            _funding_line(cand)[:120],
+            "", "", "watching", "",
+        ])
+    if rows:
+        try:
+            tab.append_rows(rows)
+            print(f"[watchlist] added {len(rows)} WATCH/BACKLOG companies to '{WATCHLIST_TAB}'")
+        except Exception as e:
+            print(f"[watchlist] could not append: {e}")
+
+
+def _careers_signal_count(website: str) -> int:
+    """Count job-posting-ish markers on the company's careers page (0 if none)."""
+    for p in _CAREERS_PATHS:
+        html = _static_fetch(urljoin(website, p), 12)
+        if html and _JOBISH_RE.search(html):
+            return len(_JOBISH_RE.findall(html))
+    return 0
+
+
+def _news_since(company: str, since: str) -> list:
+    """Free Google News RSS. Returns [(title, link, 'YYYY-MM-DD')] published after `since`."""
+    try:
+        q = requests.utils.quote(f'"{company}"')
+        feed = feedparser.parse(
+            f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+        )
+    except Exception:
+        return []
+    out = []
+    for e in feed.entries[:10]:
+        pub = ""
+        if getattr(e, "published_parsed", None):
+            pub = time.strftime("%Y-%m-%d", e.published_parsed)
+        if since and pub and pub <= since:
+            continue
+        title = getattr(e, "title", "").strip()
+        if title:
+            out.append((title, getattr(e, "link", ""), pub))
+    return out
+
+
+def _watchlist_interpret(ai_client, name: str, website: str, signals: list, since: str) -> dict:
+    """One web-search Claude call — fired only when a deterministic signal hit.
+    Returns {past_seed: bool, stage, funding, note}."""
+    q = (f'"{name}"' + (f" ({website})" if website else "")
+         + f" is a seed-stage company on my watchlist. Since {since or 'it was added'}, "
+         f"these signals appeared: {'; '.join(signals)}.\n\n"
+         "Using web search, confirm what actually changed. Report ONLY what you can cite:\n"
+         "- Has the company raised a NEW round? amount, round type, lead investor, date\n"
+         "- Its CURRENT stage (pre-seed / seed / seed extension / Series A / Series B+)\n"
+         "- Total raised to date\n\n"
+         "End with EXACTLY this line:\n"
+         "VERDICT: <PAST_SEED|STILL_EARLY|UNCLEAR> || <stage> || <total raised> || <one-line note>")
+    tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+    messages = [{"role": "user", "content": q}]
+    try:
+        resp = None
+        for _ in range(4):  # allow pause_turn continuations
+            resp = ai_client.messages.create(model=MODEL, max_tokens=900,
+                                             tools=tools, messages=messages)
+            if resp.stop_reason != "pause_turn":
+                break
+            messages.append({"role": "assistant", "content": resp.content})
+        text = "".join(b.text for b in resp.content
+                       if getattr(b, "type", "") == "text").strip()
+    except Exception as e:
+        record_llm_error(f"watchlist interpret {name}", e)
+        return {}
+    line = ""
+    for ln in reversed(text.splitlines()):
+        if "VERDICT:" in ln.upper():
+            line = ln.split(":", 1)[1]
+            break
+    parts = [p.strip() for p in line.split("||")] if line else []
+    verdict = parts[0].upper() if parts else ""
+    return {
+        "past_seed": "PAST_SEED" in verdict,
+        "stage": parts[1] if len(parts) > 1 else "",
+        "funding": parts[2] if len(parts) > 2 else "",
+        "note": (parts[3] if len(parts) > 3 else text[:180]),
+    }
+
+
+def recheck_watchlist(ai_client, sheet_client) -> list:
+    """Re-check due Watchlist companies for movement. Deterministic signals are
+    free; a Claude web-search call fires only when one hits. Returns the list of
+    companies that moved (for the digest)."""
+    if not WATCHLIST_ENABLED:
+        return []
+    watch = _load_watchlist(sheet_client)
+    if not watch:
+        print("[watchlist] nothing tracked yet")
+        return []
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(days=WATCHLIST_RECHECK_DAYS)).strftime("%Y-%m-%d")
+    due = [w for w in watch
+           if str(w.get("Status", "watching")).strip().lower() in ("", "watching", "moved")
+           and str(w.get("Last Checked", "") or "") < cutoff][:WATCHLIST_MAX_CHECK]
+    if not due:
+        print(f"[watchlist] {len(watch)} tracked, none due for re-check")
+        return []
+    print(f"[watchlist] re-checking {len(due)} of {len(watch)} tracked companies")
+
+    cache = _load_watchlist_cache(sheet_client)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cache_updates, cell_updates, moved = {}, [], []
+
+    for w in due:
+        nm = str(w["Company"]).strip()
+        site = str(w.get("Website", "") or "").strip()
+        norm = _norm_company(nm)
+        prev_fund = _dollars(w.get("Last Funding", ""))
+        since = str(w.get("Last Checked", "") or w.get("Added", "") or "")
+        signals = []
+
+        # 1. New / larger SEC Form D
+        try:
+            sec = _sec_form_d_lookup(nm)
+        except Exception:
+            sec = {}
+        sec_amt = safe_float(sec.get("total_funding_usd", 0))
+        if sec_amt and sec_amt > max(prev_fund * 1.2, prev_fund + 500_000):
+            signals.append(f"SEC Form D ${sec_amt:,.0f} ({sec.get('last_funding_date', '')})")
+
+        # 2. Funding language on their own site
+        if site:
+            try:
+                fund = scan_site_for_funding(site)
+            except Exception:
+                fund = {}
+            amt = safe_float(fund.get("amount_usd", 0))
+            if amt and amt > max(prev_fund * 1.2, prev_fund + 500_000):
+                signals.append(f"site announces {fund.get('round_type') or 'a round'} ${amt:,.0f}")
+
+        # 3. Homepage change  +  4. Careers-page growth
+        old_hash, old_jobs = cache.get(norm, ("", 0))
+        new_hash, new_jobs = old_hash, old_jobs
+        if site:
+            page = _fetch_page_text(site)
+            if page:
+                new_hash = hashlib.sha256(page.encode("utf-8", "ignore")).hexdigest()[:16]
+                if old_hash and new_hash != old_hash:
+                    signals.append("homepage changed")
+            try:
+                new_jobs = _careers_signal_count(site)
+            except Exception:
+                new_jobs = old_jobs
+            if new_jobs - old_jobs >= 3:
+                signals.append(f"hiring - job posts {old_jobs} -> {new_jobs}")
+        cache_updates[norm] = (new_hash, new_jobs)
+
+        # 5. Fresh press
+        news = _news_since(nm, since)
+        if news:
+            signals.append(f"press: {news[0][0][:90]}")
+
+        if not signals:
+            cell_updates.append({"range": f"I{w['_row']}", "values": [[now]]})  # Last Checked
+            continue
+
+        # A signal hit — spend one Claude web-search call to interpret it.
+        v = _watchlist_interpret(ai_client, nm, site, signals, since)
+        status = "graduated" if v.get("past_seed") else "moved"
+        last_signal = f"{now}: " + "; ".join(signals)
+        if v.get("note"):
+            last_signal += f" — {v['note']}"
+        updates = {
+            "G": v.get("stage") or w.get("Last Stage", ""),
+            "H": v.get("funding") or w.get("Last Funding", ""),
+            "I": now,
+            "J": last_signal[:400],
+            "K": status,
+        }
+        for col, val in updates.items():
+            cell_updates.append({"range": f"{col}{w['_row']}", "values": [[str(val)]]})
+        moved.append({"name": nm, "website": site, "status": status, "signals": signals,
+                      "note": v.get("note", ""), "stage": v.get("stage", ""),
+                      "funding": v.get("funding", ""),
+                      "news_url": news[0][1] if news else ""})
+        print(f"[watchlist] {status.upper()}: {nm} — {'; '.join(signals)}")
+
+    if cell_updates:
+        try:
+            _watchlist_tab(sheet_client).batch_update(cell_updates)
+        except Exception as e:
+            print(f"[watchlist] could not write row updates: {e}")
+    _save_watchlist_cache(sheet_client, cache_updates)
+    return moved
+
+
+def _watchlist_digest(moved: list) -> str:
+    lines = [f"WATCHLIST — {len(moved)} moved since last run", "=" * 40, ""]
+    for m in moved:
+        tag = "GRADUATED — raised past seed" if m["status"] == "graduated" else "MOVED"
+        lines.append(f"• {m['name']}  [{tag}]")
+        if m.get("stage") or m.get("funding"):
+            lines.append(f"   now: {m.get('stage') or '?'}   {m.get('funding') or ''}".rstrip())
+        lines.append(f"   signals: {'; '.join(m['signals'])}")
+        if m.get("note"):
+            lines.append(f"   {m['note']}")
+        for u in (m.get("website"), m.get("news_url")):
+            if u:
+                lines.append(f"   {u}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ============================================================================
 # Funding verification for $0-funding candidates (YC + RSS fallbacks)
 # ============================================================================
 def _crunchbase_lookup(company_name: str) -> dict:
@@ -1497,6 +1844,17 @@ def main():
 
     sheet_client = get_sheet_client()
 
+    # Step 0: Re-check the watchlist for movement (cross-vertical, cheap — free
+    # deterministic signals, one Claude call only when a signal fires).
+    print("STEP 0: Watchlist re-check")
+    print("-" * 60)
+    try:
+        watchlist_moved = recheck_watchlist(ai_client, sheet_client)
+    except Exception as e:
+        print(f"[watchlist] re-check failed (non-fatal): {e}")
+        watchlist_moved = []
+    print(f"Watchlist: {len(watchlist_moved)} moved\n")
+
     # Step 1: Source collection
     print("STEP 1: Pulling from vertical-specific sources")
     print("-" * 60)
@@ -1695,15 +2053,27 @@ def main():
                 scrape_done.add(_norm_company(s["candidate"].get("name", "")))
         _resolve_scrape_seen(sheet_client, _load_scrape_state(sheet_client), scrape_done)
 
-    # Step 7: Email digest
+    # Step 6: Track this run's thesis-fit-but-not-yet-conviction companies
+    # (WATCH / BACKLOG) on the watchlist. On-demand industry runs are ad-hoc —
+    # keep them out of the curated watchlist.
+    if not industry_query:
+        add_to_watchlist(sheet_client, scored, vertical_label=name)
+
+    # Step 7: Email digest — send if there's a new candidate OR the watchlist moved.
+    digest_parts = []
+    if watchlist_moved:
+        digest_parts.append(_watchlist_digest(watchlist_moved))
     if scored:
+        digest_parts.append(build_outreach_digest(scored))
+    if digest_parts:
         if industry_query:
             subject = f"On-Demand Pipeline: {name} — {len(scored)} candidates"
             header = f"Industry query: {industry_query}\nSynthesized vertical: {name}\n"
         else:
-            subject = f"Vertical Pipeline {name} — {len(scored)} candidates"
+            moved_tag = f", {len(watchlist_moved)} watchlist moves" if watchlist_moved else ""
+            subject = f"Vertical Pipeline {name} — {len(scored)} candidates{moved_tag}"
             header = f"Vertical: {name}\n"
-        send_email_digest(subject=subject, body=header + "\n" + build_outreach_digest(scored))
+        send_email_digest(subject=subject, body=header + "\n" + "\n\n".join(digest_parts))
 
     print(f"\n{'='*60}")
     print(f"Pipeline run complete — {label}: {name}")
