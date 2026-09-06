@@ -565,6 +565,78 @@ def get_vertical(vertical_id: int) -> dict:
     return None
 
 
+# ============================================================================
+# Second Layer Maps — public-facing taxonomy for a trend
+# ============================================================================
+# A "map" takes one dominant trend and names the derived problem layers it
+# creates, then the pipeline classifies each seed-stage company it has surfaced
+# for that vertical into a layer. The result is written to the "Second Layer Map"
+# sheet tab and rendered as a public page on bryanhanleyvc.com.
+#
+# EDIT THIS: the layer list is a thesis statement. Reword the problems, reorder,
+# add or drop layers — the classifier and the public page both read from here.
+SECOND_LAYER_MAPS = {
+    21: {
+        "trend": "The AI compute buildout",
+        "trend_blurb": (
+            "AI data centers are being built faster than the energy, grid, and "
+            "thermal systems that run them. Every bottleneck in that buildout is "
+            "a software opportunity — and that is where this fund invests."
+        ),
+        "layers": [
+            {
+                "id": "siting",
+                "name": "Siting & permitting",
+                "problem": (
+                    "Finding buildable sites and getting them approved — land, power "
+                    "availability, water, community, environmental review — is slow and manual."
+                ),
+            },
+            {
+                "id": "interconnection",
+                "name": "Interconnection & grid",
+                "problem": (
+                    "Connecting new load to the grid means multi-year interconnection "
+                    "queues and studies. Navigating and modeling that process is a software problem."
+                ),
+            },
+            {
+                "id": "financing",
+                "name": "Financing & transactions",
+                "problem": (
+                    "The energy projects behind data centers need PPAs, tax-credit "
+                    "transfers, and project finance — paperwork-heavy processes with little tooling."
+                ),
+            },
+            {
+                "id": "thermal",
+                "name": "Thermal & cooling",
+                "problem": (
+                    "As chips get denser, cooling moves to liquid and immersion. "
+                    "Optimizing thermal performance and water use is increasingly software-controlled."
+                ),
+            },
+            {
+                "id": "flexibility",
+                "name": "Load flexibility & demand response",
+                "problem": (
+                    "Making compute loads grid-interactive — shifting or curtailing to "
+                    "match grid conditions — unlocks capacity without building new wires."
+                ),
+            },
+        ],
+    },
+}
+
+
+def get_second_layer_map(vertical_id) -> dict:
+    """The public Second Layer map taxonomy for a vertical, or {} if it has none."""
+    try:
+        return SECOND_LAYER_MAPS.get(int(vertical_id), {})
+    except (TypeError, ValueError):
+        return {}
+
+
 def get_scrape_targets(vertical: dict) -> list:
     """
     Return HTML scrape targets for a vertical (empty list if none defined).

@@ -296,6 +296,9 @@ Every run costs Anthropic API tokens (rough estimate: ~$0.50 for a typical verti
 | `SCRAPE_HEADLESS` | `1` | `0` skips the Chromium fallback (also cuts ~1–2 min of CI per run). |
 | `SCRAPE_RETRY_DAYS` | `60` | A scrape company that keeps soft-failing is retried each run until it's this old, then dropped. |
 | `EXTRA_SOURCES` | `1` | `0` disables YC Launch HN / Product Hunt / VC newsletters (free APIs, but add candidates → more scoring calls). |
+| `WATCHLIST` | `1` | `0` disables the watchlist re-check step (STEP 0). |
+| `WATCHLIST_RECHECK_DAYS` | `20` | A tracked company isn't re-checked again until its last check is this old. |
+| `WATCHLIST_MAX_CHECK` | `40` | Cap on watchlist companies re-checked per run. Deterministic signals are free; a Claude web-search call fires only when a signal hits (~$0.05 each). |
 
 Scoring and Second Layer evaluation stay on the capable model regardless — candidate quality is not traded for cost there.
 
@@ -304,6 +307,52 @@ Scoring and Second Layer evaluation stay on the capable model regardless — can
 **Pre-scoring enrichment** — before the 9-factor score, each Second Layer survivor's own website (`/`, `/about`, `/product`, `/solutions`) is fetched and fed to the scorer, so it judges on real material rather than a one-line blurb.
 
 **Scrape retry** — the `Scrape Seen` tab now carries a `Status`. A company is marked `done` (never re-surfaced) only when it's **written to the sheet** or **hard-rejected** (over the funding cap, too old). One that just scored 55–63% stays `pending` and is re-tried on the next run of that vertical.
+
+## Watchlist (longitudinal tracking)
+
+Finding a great deal *early* means seeing a company before its round. A one-shot
+run is a snapshot; the watchlist adds memory.
+
+- **What goes on it** — every run auto-adds its thesis-fit-but-not-yet-conviction
+  companies (scored below `MIN_SCORE_PCT` — the WATCH / BACKLOG tiers) to the
+  **`Watchlist`** sheet tab. Add rows by hand too: fill `Company` + `Website`,
+  set `Source` to `manual`.
+- **STEP 0, every run** — the due companies (not re-checked within
+  `WATCHLIST_RECHECK_DAYS`) are checked for *movement*, cheapest signal first:
+  1. a new / larger **SEC Form D** filing
+  2. **funding language on their own site** (`scan_site_for_funding`)
+  3. **homepage changed** (content-hash vs last check, `Watchlist Cache` tab)
+  4. **hiring** — job-posting count on `/careers` grew by ≥3
+  5. **fresh press** — Google News RSS for the company name (free)
+- **Escalation** — only when ≥1 signal fires does the pipeline spend **one Claude
+  web-search call** to confirm what changed and whether the company is now past
+  seed. The row's `Status` becomes `moved`, or `graduated` if it raised a
+  Series A+ / over the $10M cap. `Last Signal` records what was seen.
+- **Digest** — any movement gets a **WATCHLIST** section at the top of the email,
+  and the run emails even if it produced no new candidates.
+- The `Notes` column is yours — the pipeline never overwrites it.
+
+## Second Layer Map (public)
+
+Some verticals carry a `SECOND_LAYER_MAPS` entry in `vertical_sources.py`: a
+dominant trend plus the derived problem **layers** it creates. After scoring
+(STEP 6b), the pipeline classifies that vertical's written companies into those
+layers (one cheap `MODEL_EXTRACT` call per 15 companies) and rewrites the trend's
+rows in the **`Second Layer Map`** sheet tab — trend, layer, problem statement,
+company, a neutral public one-liner, stage, website.
+
+The map is an **outreach artifact, not the full board**:
+
+- Only companies scoring **≥ `MAP_MIN_SCORE`** (default 62) go on it.
+- Each layer is capped at **`MAP_PER_LAYER`** (default 6), highest score first.
+- The tab holds **only publish-safe fields** — no scores, risks, founders, or
+  contacts.
+- Put anything in a row's **`Hide`** column and it's dropped from the public
+  page; the flag is preserved across pipeline re-runs (matched by company name).
+
+`bryanhanleyvc.com/map` renders it as a public, no-login page. To add a trend,
+add a `SECOND_LAYER_MAPS[<vertical id>]` entry and run that vertical; edit the
+layer wording there and it flows through to the page on the next run.
 
 ## On-Demand Pipeline (any industry)
 
