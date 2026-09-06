@@ -1094,6 +1094,7 @@ def add_to_watchlist(sheet_client, scored: list, vertical_label: str = "") -> No
         if not nm or norm in seen:
             continue
         seen.add(norm)
+        note = "no verifiable footprint at add time" if _is_unverifiable(s) else ""
         rows.append([
             nm, cand.get("website", ""),
             vertical_label or cand.get("industry", ""),
@@ -1101,7 +1102,7 @@ def add_to_watchlist(sheet_client, scored: list, vertical_label: str = "") -> No
             f"{safe_float(s.get('weighted_pct', 0)):.0f}",
             cand.get("last_funding_round", cand.get("stage", "")),
             _funding_line(cand)[:120],
-            "", "", "watching", "",
+            "", "", "watching", note,
         ])
     if rows:
         try:
@@ -1964,6 +1965,38 @@ def build_outreach_digest(scored: list) -> str:
     return "\n".join(lines)
 
 
+# Companies with no verifiable footprint at all go to the watchlist, not the
+# board. Set DROP_UNVERIFIABLE=0 to write everything that clears the floor.
+DROP_UNVERIFIABLE = (os.environ.get("DROP_UNVERIFIABLE") or "1").strip() != "0"
+
+_FOUNDER_UNKNOWN_RE = re.compile(
+    r"unverified|needs manual lookup|not found|^n/?a$|^unknown$|^-+$|^tbd$", re.I
+)
+
+
+def _is_unverifiable(rec: dict) -> bool:
+    """True when a scored survivor has NO confirmed footprint — no named
+    founders, no verified/known funding, and no product-market-fit or traction
+    signal. A believable description alone is not evidence the company exists."""
+    cand = rec["candidate"]
+    founders = (rec.get("founders") or "").strip()
+    founders_unknown = not founders or bool(_FOUNDER_UNKNOWN_RE.search(founders))
+
+    # Funding counts as proof-of-existence only if it's multi-source (high), or a
+    # single source of a real seed-scale amount. A tiny lone Form D doesn't.
+    raised = safe_float(cand.get("total_funding_usd", 0))
+    conf = (cand.get("_funding_confidence") or "").lower()
+    funding_verified = not cand.get("_funding_unverified") and (
+        (conf == "high" and raised > 0)
+        or (conf == "medium" and raised >= 1_000_000)
+    )
+
+    s = rec.get("scores", {})
+    has_traction = safe_float(s.get("2A", 5)) > 4 or safe_float(s.get("5", 5)) > 4
+
+    return founders_unknown and not funding_verified and not has_traction
+
+
 def main():
     ai_client = get_anthropic_client()
     industry_query = os.environ.get("INDUSTRY_QUERY", "").strip()
@@ -2174,14 +2207,28 @@ def main():
         recs.sort(key=lambda x: x["weighted_pct"], reverse=True)
 
     scored = [r for r in recs if r["weighted_pct"] >= WRITE_FLOOR_PCT]
+
+    # Route companies with no verifiable footprint to the watchlist only — they
+    # never reach the board. If one is real and raises or gets press, the
+    # watchlist re-check surfaces it, verified.
+    unverifiable = []
+    if DROP_UNVERIFIABLE:
+        _uv = {id(r) for r in scored
+               if r["weighted_pct"] < MIN_SCORE_PCT and _is_unverifiable(r)}
+        unverifiable = [r for r in scored if id(r) in _uv]
+        scored = [r for r in scored if id(r) not in _uv]
+        if unverifiable:
+            print(f"  {len(unverifiable)} unverifiable -> watchlist only: "
+                  + ", ".join(r["candidate"].get("name", "?") for r in unverifiable))
+
     for r in scored:
         r["_recommended"] = r["weighted_pct"] >= MIN_SCORE_PCT
         c = r["candidate"]
         print(f"  {c['name']:33s} {r['weighted_pct']:5.1f}%  {r['decision']} [{c.get('_source', '?')}]")
-    dropped = len(recs) - len(scored)
+    dropped = len(recs) - len(scored) - len(unverifiable)
     print(f"\nWriting {len(scored)} (>= {WRITE_FLOOR_PCT}%); "
           f"{sum(r['_recommended'] for r in scored)} recommended (>= {MIN_SCORE_PCT}%); "
-          f"{dropped} below floor")
+          f"{dropped} below floor; {len(unverifiable)} unverifiable held on watchlist")
 
     # Step 5b: Contact enrichment for the top slice (website scrape only).
     if scored and ENRICH_CONTACTS:
@@ -2202,19 +2249,20 @@ def main():
     print("-" * 60)
     write_scored_candidates(sheet_client, target_tab, scored, vertical_label=name)
 
-    # Resolve scrape state: written or hard-rejected -> 'done'; the rest stay
-    # 'pending' and re-surface next run (until SCRAPE_RETRY_DAYS).
+    # Resolve scrape state: written, hard-rejected, or held-unverifiable -> 'done'
+    # (the watchlist tracks it now); the rest stay 'pending' and re-surface next
+    # run (until SCRAPE_RETRY_DAYS).
     if SCRAPE_LAYER_ENABLED and get_scrape_targets(vertical):
-        for s in scored:
+        for s in scored + unverifiable:
             if s["candidate"].get("_from_scrape"):
                 scrape_done.add(_norm_company(s["candidate"].get("name", "")))
         _resolve_scrape_seen(sheet_client, _load_scrape_state(sheet_client), scrape_done)
 
     # Step 6: Track this run's thesis-fit-but-not-yet-conviction companies
-    # (WATCH / BACKLOG) on the watchlist. On-demand industry runs are ad-hoc —
-    # keep them out of the curated watchlist.
+    # (WATCH / BACKLOG) plus the unverifiable ones on the watchlist. On-demand
+    # industry runs are ad-hoc — keep them out of the curated watchlist.
     if not industry_query:
-        add_to_watchlist(sheet_client, scored, vertical_label=name)
+        add_to_watchlist(sheet_client, scored + unverifiable, vertical_label=name)
 
     # Step 6b: Refresh the public Second Layer Map for this vertical (if it has a
     # taxonomy) — classifies its written companies into the trend's problem layers.
