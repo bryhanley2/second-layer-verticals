@@ -56,7 +56,7 @@ from pipeline_utils import (
 )
 from vertical_sources import (
     get_vertical, get_vertical_by_day_of_year, synthesize_vertical,
-    get_scrape_targets, passes_scrape_filter,
+    get_scrape_targets, passes_scrape_filter, get_second_layer_map,
 )
 from new_sources import source_yc_launches, source_producthunt, VC_NEWSLETTER_FEEDS
 from contact_enrich import enrich_contact, scan_site_for_funding, fetch_company_context
@@ -1309,6 +1309,132 @@ def _watchlist_digest(moved: list) -> str:
 
 
 # ============================================================================
+# Second Layer Map — classify surfaced companies into the trend's problem layers
+# ============================================================================
+_MAP_TAB = "Second Layer Map"
+_MAP_HEADERS = [
+    "Trend", "Trend Blurb", "Layer Order", "Layer ID", "Layer", "Problem",
+    "Company", "Blurb", "Stage", "Website", "Updated",
+]
+
+
+def _classify_into_layers(ai_client, layers: list, companies: list) -> dict:
+    """{company_name: (layer_id, public_blurb)} — one cheap call per chunk.
+    Companies that fit no layer are omitted."""
+    out = {}
+    layer_lines = "\n".join(f"  {l['id']}: {l['name']} — {l['problem']}" for l in layers)
+    valid = {l["id"] for l in layers}
+    for i in range(0, len(companies), 15):
+        chunk = companies[i:i + 15]
+        listing = "\n".join(
+            f"{n+1}. {c['name']} — {str(c.get('description') or c.get('summary') or '')[:200]}"
+            for n, c in enumerate(chunk)
+        )
+        prompt = (
+            "Problem layers of one trend (the AI compute buildout):\n"
+            f"{layer_lines}\n\n"
+            "For each company below, pick the ONE layer it primarily addresses, and "
+            "write a neutral 8-to-14-word description of what it does (public-facing, "
+            "no hype, no investment language).\n\n"
+            f"{listing}\n\n"
+            "Reply one line per company, EXACTLY:\n"
+            "<number> | <layer id> | <description>\n"
+            "If a company fits none of the layers, use layer id NONE."
+        )
+        try:
+            resp = ai_client.messages.create(
+                model=MODEL_EXTRACT, max_tokens=900,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(b.text for b in resp.content
+                           if getattr(b, "type", "") == "text")
+        except Exception as e:
+            record_llm_error("second layer map classify", e)
+            continue
+        for line in text.splitlines():
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 3 or not parts[0].lstrip().rstrip(".").isdigit():
+                continue
+            idx = int(parts[0].rstrip(".")) - 1
+            lid, blurb = parts[1].lower(), parts[2]
+            if 0 <= idx < len(chunk) and lid in valid and blurb:
+                out[chunk[idx]["name"]] = (lid, blurb[:200])
+    return out
+
+
+def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label: str) -> None:
+    """Project this vertical's written companies onto its public problem-layer
+    taxonomy and (re)write the trend's rows in the 'Second Layer Map' tab."""
+    spec = get_second_layer_map(vertical_id)
+    if not spec:
+        return
+    trend, layers = spec["trend"], spec["layers"]
+    try:
+        vt = sheet_client.open_by_key(SHEET_ID).worksheet(VERTICAL_TAB)
+        rows = vt.get_all_records()
+    except Exception as e:
+        print(f"[map] could not read '{VERTICAL_TAB}': {e}")
+        return
+
+    # Companies written for this vertical, newest first, deduped, capped.
+    seen, companies = set(), []
+    for r in reversed(rows):
+        if vertical_label.lower() not in str(r.get("Vertical", "")).lower():
+            continue
+        nm = str(r.get("Company", "")).strip()
+        key = _norm_company(nm)
+        if not nm or key in seen:
+            continue
+        seen.add(key)
+        companies.append({
+            "name": nm,
+            "description": str(r.get("Description", "") or ""),
+            "summary": str(r.get("Summary", "") or ""),
+            "stage": str(r.get("Stage", "") or ""),
+            "website": str(r.get("Website", "") or ""),
+        })
+        if len(companies) >= 60:
+            break
+    if not companies:
+        print("[map] no companies for this vertical yet")
+        return
+
+    placed = _classify_into_layers(ai_client, layers, companies)
+    if not placed:
+        print("[map] classifier placed nothing")
+        return
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    by_id = {l["id"]: l for l in layers}
+    new_rows = []
+    for c in companies:
+        hit = placed.get(c["name"])
+        if not hit:
+            continue
+        lid, blurb = hit
+        l = by_id[lid]
+        new_rows.append([
+            trend, spec["trend_blurb"], layers.index(l), lid, l["name"], l["problem"],
+            c["name"], blurb, c["stage"], c["website"], now,
+        ])
+
+    try:
+        tab = ensure_tab(sheet_client, _MAP_TAB, headers=_MAP_HEADERS,
+                         rows=2000, cols=len(_MAP_HEADERS) + 1)
+        keep = [r for r in tab.get_all_records()
+                if str(r.get("Trend", "")).strip() != trend]  # other trends' rows
+        tab.clear()
+        tab.append_row(_MAP_HEADERS)
+        if keep:
+            tab.append_rows([[r.get(h, "") for h in _MAP_HEADERS] for r in keep])
+        tab.append_rows(new_rows)
+        print(f"[map] wrote {len(new_rows)} companies across "
+              f"{len({r[3] for r in new_rows})} layers for '{trend}'")
+    except Exception as e:
+        print(f"[map] could not write '{_MAP_TAB}': {e}")
+
+
+# ============================================================================
 # Funding verification for $0-funding candidates (YC + RSS fallbacks)
 # ============================================================================
 def _crunchbase_lookup(company_name: str) -> dict:
@@ -2058,6 +2184,14 @@ def main():
     # keep them out of the curated watchlist.
     if not industry_query:
         add_to_watchlist(sheet_client, scored, vertical_label=name)
+
+    # Step 6b: Refresh the public Second Layer Map for this vertical (if it has a
+    # taxonomy) — classifies its written companies into the trend's problem layers.
+    if not industry_query:
+        try:
+            build_second_layer_map(ai_client, sheet_client, idx, name)
+        except Exception as e:
+            print(f"[map] build failed (non-fatal): {e}")
 
     # Step 7: Email digest — send if there's a new candidate OR the watchlist moved.
     digest_parts = []

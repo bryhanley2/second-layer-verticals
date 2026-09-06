@@ -332,6 +332,20 @@ run is a snapshot; the watchlist adds memory.
   and the run emails even if it produced no new candidates.
 - The `Notes` column is yours — the pipeline never overwrites it.
 
+## Second Layer Map (public)
+
+Some verticals carry a `SECOND_LAYER_MAPS` entry in `vertical_sources.py`: a
+dominant trend plus the derived problem **layers** it creates. After scoring
+(STEP 6b), the pipeline classifies that vertical's written companies into those
+layers (one cheap `MODEL_EXTRACT` call per 15 companies) and rewrites the trend's
+rows in the **`Second Layer Map`** sheet tab — trend, layer, problem statement,
+company, a neutral public one-liner, stage, website.
+
+The tab holds **only publish-safe fields** — no scores, risks, founders, or
+contacts. `bryanhanleyvc.com/map` renders it as a public, no-login page. To add a
+trend, add a `SECOND_LAYER_MAPS[<vertical id>]` entry and run that vertical; edit
+the layer wording there and it flows through to the page on the next run.
+
 ## On-Demand Pipeline (any industry)
 
 Instead of one of the 22 predefined verticals, the pipeline can be run against a
