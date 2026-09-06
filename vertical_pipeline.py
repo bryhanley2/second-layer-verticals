@@ -1314,8 +1314,18 @@ def _watchlist_digest(moved: list) -> str:
 _MAP_TAB = "Second Layer Map"
 _MAP_HEADERS = [
     "Trend", "Trend Blurb", "Layer Order", "Layer ID", "Layer", "Problem",
-    "Company", "Blurb", "Stage", "Website", "Updated",
+    "Company", "Blurb", "Stage", "Website", "Updated", "Hide",
 ]
+# The public map is an outreach artifact, not the full board. Only companies that
+# cleared a real quality score go on it, and each layer is capped.
+try:
+    MAP_MIN_SCORE = int(os.environ.get("MAP_MIN_SCORE") or "62")
+except ValueError:
+    MAP_MIN_SCORE = 62
+try:
+    MAP_PER_LAYER = int(os.environ.get("MAP_PER_LAYER") or "6")
+except ValueError:
+    MAP_PER_LAYER = 6
 
 
 def _classify_into_layers(ai_client, layers: list, companies: list) -> dict:
@@ -1376,7 +1386,8 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
         print(f"[map] could not read '{VERTICAL_TAB}': {e}")
         return
 
-    # Companies written for this vertical, newest first, deduped, capped.
+    # Companies written for this vertical that cleared MAP_MIN_SCORE, deduped,
+    # best score first, capped before the classify calls.
     seen, companies = set(), []
     for r in reversed(rows):
         if vertical_label.lower() not in str(r.get("Vertical", "")).lower():
@@ -1385,6 +1396,9 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
         key = _norm_company(nm)
         if not nm or key in seen:
             continue
+        score = safe_float(r.get("Weighted %", 0))
+        if score < MAP_MIN_SCORE:
+            continue
         seen.add(key)
         companies.append({
             "name": nm,
@@ -1392,11 +1406,12 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
             "summary": str(r.get("Summary", "") or ""),
             "stage": str(r.get("Stage", "") or ""),
             "website": str(r.get("Website", "") or ""),
+            "score": score,
         })
-        if len(companies) >= 60:
-            break
+    companies.sort(key=lambda c: c["score"], reverse=True)
+    companies = companies[:60]
     if not companies:
-        print("[map] no companies for this vertical yet")
+        print(f"[map] no companies for this vertical scored >= {MAP_MIN_SCORE}")
         return
 
     placed = _classify_into_layers(ai_client, layers, companies)
@@ -1404,32 +1419,48 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
         print("[map] classifier placed nothing")
         return
 
+    # Preserve the manual 'Hide' flag (and drop this trend's old rows) — match by name.
+    try:
+        tab = ensure_tab(sheet_client, _MAP_TAB, headers=_MAP_HEADERS,
+                         rows=2000, cols=len(_MAP_HEADERS) + 1)
+        existing = tab.get_all_records()
+    except Exception as e:
+        print(f"[map] could not open '{_MAP_TAB}': {e}")
+        return
+    keep = [r for r in existing if str(r.get("Trend", "")).strip() != trend]
+    hide_by_name = {
+        _norm_company(str(r.get("Company", ""))): str(r.get("Hide", "")).strip()
+        for r in existing
+        if str(r.get("Trend", "")).strip() == trend and str(r.get("Hide", "")).strip()
+    }
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     by_id = {l["id"]: l for l in layers}
-    new_rows = []
-    for c in companies:
+    per_layer: dict = {}
+    for c in companies:  # already best-score-first
         hit = placed.get(c["name"])
         if not hit:
             continue
         lid, blurb = hit
+        if len(per_layer.get(lid, [])) >= MAP_PER_LAYER:
+            continue
         l = by_id[lid]
-        new_rows.append([
+        per_layer.setdefault(lid, []).append([
             trend, spec["trend_blurb"], layers.index(l), lid, l["name"], l["problem"],
             c["name"], blurb, c["stage"], c["website"], now,
+            hide_by_name.get(_norm_company(c["name"]), ""),
         ])
+    new_rows = [row for lid in per_layer for row in per_layer[lid]]
 
     try:
-        tab = ensure_tab(sheet_client, _MAP_TAB, headers=_MAP_HEADERS,
-                         rows=2000, cols=len(_MAP_HEADERS) + 1)
-        keep = [r for r in tab.get_all_records()
-                if str(r.get("Trend", "")).strip() != trend]  # other trends' rows
         tab.clear()
         tab.append_row(_MAP_HEADERS)
         if keep:
             tab.append_rows([[r.get(h, "") for h in _MAP_HEADERS] for r in keep])
         tab.append_rows(new_rows)
-        print(f"[map] wrote {len(new_rows)} companies across "
-              f"{len({r[3] for r in new_rows})} layers for '{trend}'")
+        shown = sum(1 for r in new_rows if not r[-1])
+        print(f"[map] wrote {len(new_rows)} companies ({shown} visible, "
+              f"{len(new_rows) - shown} hidden) across {len(per_layer)} layers for '{trend}'")
     except Exception as e:
         print(f"[map] could not write '{_MAP_TAB}': {e}")
 

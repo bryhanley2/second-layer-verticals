@@ -341,10 +341,18 @@ layers (one cheap `MODEL_EXTRACT` call per 15 companies) and rewrites the trend'
 rows in the **`Second Layer Map`** sheet tab — trend, layer, problem statement,
 company, a neutral public one-liner, stage, website.
 
-The tab holds **only publish-safe fields** — no scores, risks, founders, or
-contacts. `bryanhanleyvc.com/map` renders it as a public, no-login page. To add a
-trend, add a `SECOND_LAYER_MAPS[<vertical id>]` entry and run that vertical; edit
-the layer wording there and it flows through to the page on the next run.
+The map is an **outreach artifact, not the full board**:
+
+- Only companies scoring **≥ `MAP_MIN_SCORE`** (default 62) go on it.
+- Each layer is capped at **`MAP_PER_LAYER`** (default 6), highest score first.
+- The tab holds **only publish-safe fields** — no scores, risks, founders, or
+  contacts.
+- Put anything in a row's **`Hide`** column and it's dropped from the public
+  page; the flag is preserved across pipeline re-runs (matched by company name).
+
+`bryanhanleyvc.com/map` renders it as a public, no-login page. To add a trend,
+add a `SECOND_LAYER_MAPS[<vertical id>]` entry and run that vertical; edit the
+layer wording there and it flows through to the page on the next run.
 
 ## On-Demand Pipeline (any industry)
 
