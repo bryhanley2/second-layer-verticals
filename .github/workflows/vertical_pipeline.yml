@@ -39,6 +39,9 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Run vertical pipeline
         env:
+          # Flush print() immediately so the Actions log streams live instead of
+          # dumping everything at the end of the step.
+          PYTHONUNBUFFERED: "1"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
