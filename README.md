@@ -296,6 +296,7 @@ Every run costs Anthropic API tokens (rough estimate: ~$0.50 for a typical verti
 | `SCRAPE_HEADLESS` | `1` | `0` skips the Chromium fallback (also cuts ~1–2 min of CI per run). |
 | `SCRAPE_RETRY_DAYS` | `60` | A scrape company that keeps soft-failing is retried each run until it's this old, then dropped. |
 | `EXTRA_SOURCES` | `1` | `0` disables YC Launch HN / Product Hunt / VC newsletters (free APIs, but add candidates → more scoring calls). |
+| `DROP_UNVERIFIABLE` | `1` | `0` writes everything that clears the floor. Default routes companies with no confirmed footprint (no named founders, no real funding, no traction) to the watchlist only — never the board. |
 | `WATCHLIST` | `1` | `0` disables the watchlist re-check step (STEP 0). |
 | `WATCHLIST_RECHECK_DAYS` | `20` | A tracked company isn't re-checked again until its last check is this old. |
 | `WATCHLIST_MAX_CHECK` | `40` | Cap on watchlist companies re-checked per run. Deterministic signals are free; a Claude web-search call fires only when a signal hits (~$0.05 each). |
