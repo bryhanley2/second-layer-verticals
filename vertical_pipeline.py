@@ -1535,6 +1535,22 @@ def _norm_company(name: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", n).strip()
 
 
+# Trailing descriptor words that don't distinguish one company from another —
+# stripped only for the dedup key ("Crux" == "Crux Climate", "Emerald" ==
+# "Emerald AI"), never for the name shown or looked up.
+_DEDUP_GENERIC = {
+    "climate", "technologies", "technology", "tech", "ai", "labs", "lab",
+    "systems", "energy", "solutions", "software", "io", "hq", "inc", "co",
+}
+
+
+def _dedup_key(name: str) -> str:
+    parts = _norm_company(name).split()
+    while len(parts) > 1 and parts[-1] in _DEDUP_GENERIC:
+        parts.pop()
+    return " ".join(parts)
+
+
 # Form D <industryGroupType> values that mean "not an operating tech startup".
 _SEC_NONSTARTUP_INDUSTRY = re.compile(
     r"pooled investment|real estate|reit|oil (and|&) gas|mining|agriculture|"
@@ -1798,13 +1814,14 @@ def _finalize_unverified(candidates: list) -> None:
 # Dedup
 # ============================================================================
 def deduplicate(candidates: list, existing_names: set) -> list:
-    """Dedup on the normalized company name (strips Inc/LLC/punctuation) so
-    'Pearl Street' / 'Pearl Street Technologies, Inc.' collapse to one."""
-    seen = {_norm_company(n) for n in existing_names if n}
+    """Dedup on a normalized key that also drops trailing descriptor words, so
+    'Pearl Street' / 'Pearl Street Technologies, Inc.' and 'Crux' / 'Crux
+    Climate' each collapse to one."""
+    seen = {_dedup_key(n) for n in existing_names if n}
     unique = []
     for c in candidates:
         raw = str(c.get("name", "")).strip()
-        key = _norm_company(raw)
+        key = _dedup_key(raw)
         if not key or key in seen:
             continue
         seen.add(key)
