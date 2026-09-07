@@ -1387,8 +1387,8 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
         print(f"[map] could not read '{VERTICAL_TAB}': {e}")
         return
 
-    # Companies written for this vertical that cleared MAP_MIN_SCORE, deduped,
-    # best score first, capped before the classify calls.
+    # Companies written for this vertical that cleared MAP_MIN_SCORE and are
+    # still seed-stage, deduped, best score first, capped before classify.
     seen, companies = set(), []
     for r in reversed(rows):
         if vertical_label.lower() not in str(r.get("Vertical", "")).lower():
@@ -1400,6 +1400,10 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
         score = safe_float(r.get("Weighted %", 0))
         if score < MAP_MIN_SCORE:
             continue
+        stage = str(r.get("Stage", "") or "").lower()
+        if re.search(r"series\s*[a-z]|series[_-][a-z]|growth|late[\s-]?stage|"
+                     r"mezzanine|pre[\s-]?ipo|public|acquired", stage):
+            continue  # the public map is seed-stage only
         seen.add(key)
         companies.append({
             "name": nm,
