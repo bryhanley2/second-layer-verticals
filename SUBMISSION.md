@@ -227,6 +227,50 @@ for (let i = 0; i < 4; i++) {                 // allow pause_turn continuations
 | Silent failure | every model call wrapped; systemic failures turn the run red |
 | Public page overclaims | curated to a score threshold plus a human `Hide` review |
 
+## By the numbers
+
+The weekend version of "AI VC sourcing" is ~200 lines: pull Crunchbase and press
+RSS, ask a model to score each company 1–10, write a sheet. What's actually here:
+
+| | |
+|---|---|
+| Pipeline code | ~4,300 lines of Python, ~110 functions, 6 modules |
+| Git history | 110 commits · 12 merged PRs · 58 branches · first commit April 2026 |
+| Verticals | 22, each with its own keyword set, feeds, and thesis framing |
+| Sourcing keywords | 244 hand-tuned |
+| Curated RSS feeds | 51 (validated — hallucinated feeds dropped) |
+| **Proprietary scrape targets** | **55** — specialist fund portfolios, DOE program pages, RTO/ISO market-participant registries, accelerator cohorts (15 verticals) |
+| Distinct data sources | 9 |
+| **Reject-filter keywords** | **102** — each tuned from a real bad row, to strip funds, accelerators, labs, and programs |
+| Funding verification | 4 independent passes + 2 reconciliation passes |
+| Scoring | 9 weighted factors, explicit 1–10 anchors each |
+| Deterministic gates | 3 (stage, size, age) |
+| Persistent state | 8 Google Sheet tabs (output, watchlist + cache, scrape-seen + cache, target ideas, map) |
+| Resilience | 81 try/except blocks; fail-closed scoring; loud systemic-failure detection |
+| Web app | ~1,700 lines TS/TSX · 3 serverless functions · 5 pages |
+
+What separates it from a quick build:
+
+1. **The sourcing surface is domain knowledge, not a data feed.** The 55 targets
+   are specific places (a DOE AI-interconnection program page, ERCOT's
+   market-participant registry, a specialist fund's portfolio) where seed-stage
+   companies appear *before* venture press. Each needs a headless browser, model
+   extraction, a run-over-run diff, and a content-hash cache.
+2. **Funding is verified four ways, not trusted.** SEC EDGAR full-text search →
+   `primary_doc.xml` parsing → fund-entity filtering → most-recent-filing logic →
+   cross-source reconciliation. (The pipeline once summed a company's filings to
+   "$5.5 billion" — that is the bug this catches.)
+3. **The 102 reject keywords** are the difference between a list that is 30% funds
+   and labs and one that is 95% operating companies.
+4. **The failure engineering only exists because it ran dozens of times** —
+   brace-trimmed JSON parsing for truncated batches, the empty-env-var bug,
+   fail-closed scoring, the workflow-turns-red check.
+5. **58 branches** means it has been argued with against real output, not
+   assembled once.
+
+The model call is the commodity. The moat is the sourcing surface, the
+verification discipline, the encoded thesis, and five months of fixes.
+
 ## Specifics
 
 | | |
@@ -235,7 +279,6 @@ for (let i = 0; i < 4; i++) {                 // allow pause_turn continuations
 | Models | a capable model for judgement; a cheap model for extraction/classification; a web-search tool for top candidates and the agent |
 | Coverage | ~22 predefined verticals plus any free-text industry on demand |
 | Stack | Python on GitHub Actions; React + Vite + TypeScript + Vercel serverless; Google Sheets as the datastore |
-| Sourcing | ~7 free feeds/APIs plus a proprietary scrape layer over fund portfolios and federal program pages |
 
 ## Reviewing it live
 
