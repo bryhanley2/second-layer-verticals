@@ -285,7 +285,7 @@ Every run costs Anthropic API tokens (rough estimate: ~$0.50 for a typical verti
 
 | Variable | Default | Effect |
 |---|---|---|
-| `PIPELINE_MODEL` | `claude-opus-4-7` | Judgement calls (scoring, Second Layer, funding verify). `claude-sonnet-5` ≈ 2.5× cheaper. |
+| `PIPELINE_MODEL` | `claude-sonnet-5` | Judgement calls (scoring, Second Layer, funding verify). Set `claude-opus-4-7` for a max-quality run (~5× the cost). |
 | `PIPELINE_MODEL_EXTRACT` | `claude-haiku-4-5` | Scrape name-extraction (mechanical). Already the cheap model. |
 | `RESEARCH_MAX_QUERIES` | `12` | Cap on Claude research calls/run (V21 defines ~24 — the rest are skipped unless you raise this). Set `4` for V21 — the research queries overlap heavily. |
 | `MIN_SCORE_PCT` | `64` | Score at/above which a written row is tagged "recommended". Does not filter. |
