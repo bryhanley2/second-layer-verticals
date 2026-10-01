@@ -1,5 +1,5 @@
 """
-Vertical Sources Configuration (V0–V19)
+Vertical Sources Configuration (V0–V22)
 =======================================
 Second Layer vertical schema. Changes from prior version:
   - Old V6 (Supply Chain, Logistics & Legal Tech) SPLIT into V6 + V7
@@ -537,6 +537,76 @@ VERTICALS = [
             "NYSERDA OR Urban Future Lab cohort grid energy software startup",
             # investor-signal convergence (funds that keep appearing in the best comps)
             "Powerhouse Ventures OR Stepchange new portfolio grid energy software seed",
+        ],
+    },
+    {
+        # V22 — Geek Ventures (NYC): FOUNDER-thesis vertical, not a sector.
+        # Sector-agnostic; priority is immigrant founders who moved to the US
+        # (underappreciated US-born founders considered too). Pre-seed / seed,
+        # idea stage to $1.5M ARR, $10B+ fast-growing TAM, bold + highly
+        # scalable. Checks $200k-$800k.
+        #
+        # Because the filter is WHO the founder is, not WHAT the company does:
+        #   - keyword-only sources with no founder data (YC dataset, SEC Form D,
+        #     Product Hunt, YC Launch HN) are skipped via "skip_sources"
+        #   - "keywords" are founder-ORIGIN phrases, matched against funding
+        #     press (TechCrunch) where founder bios actually appear
+        #   - the Second Layer filter is replaced by a web-search founder check
+        #     (evaluate_founder_thesis_fit) — see "thesis": "founder"
+        #   - companies already on geek.vc/portfolio are dropped
+        "id": 22,
+        "name": "Geek Ventures — Immigrant Founders (Sector-Agnostic)",
+        "thesis": "founder",
+        "second_layer_logic": (
+            "Sector-agnostic: any operating startup qualifies. The thesis is the "
+            "founder — immigrants who moved to the US, building bold, highly "
+            "scalable companies in $10B+ fast-growing markets."
+        ),
+        "fund_profile": {
+            "fund": "Geek Ventures",
+            "priority": "immigrant founders who moved to the US (born/raised abroad)",
+            "also": "underappreciated US-born founders (non-traditional path, outside elite networks)",
+            "stage": "pre-seed and seed — idea stage up to ~$1.5M ARR",
+            "check": "$200k-$800k",
+            "tam": "$10B+, fast-growing",
+            "style": "founders who geek out in their category; bold ideas; high scalability is a must",
+        },
+        "skip_sources": ["yc", "sec_form_d", "yc_launches", "producthunt"],
+        "exclude_portfolio_url": "https://geek.vc/portfolio",
+        # Total raised before Geek's check. Idea-stage is welcome (no floor);
+        # past ~$3M raised a $200-800k check gets thin; >$6M is too late.
+        "funding_range": {"floor": 0, "ceiling": 3_000_000, "max": 6_000_000},
+        "keywords": [
+            "immigrant", "immigrated", "emigrated", "moved to the u.s", "moved to the us",
+            "moved to america", "came to the u.s", "came to the us", "relocated to",
+            "born in", "grew up in", "originally from", "native of", "refugee",
+            "o-1", "h-1b", "visa", "green card", "first-generation", "diaspora",
+            "international founder",
+        ],
+        "rss_feeds": [],
+        "search_terms": [
+            "immigrant founder startup pre-seed round raised 2026",
+            "immigrant founders seed round announced 2026 AI startup",
+            "founder moved to the US startup raises pre-seed 2026",
+            "O-1 visa founder startup raised seed round 2026",
+            "Unshackled Ventures OR One Way Ventures OR Flair Ventures new investment pre-seed 2026",
+            "Indian-born OR Chinese-born OR Israeli founder US startup pre-seed 2026",
+            "Ukrainian OR Belarusian OR Polish founder New York startup seed round 2026",
+            "Nigerian OR Kenyan OR Ghanaian founder US startup pre-seed raised 2026",
+            "Brazilian OR Mexican OR Colombian OR Argentine founder US startup seed round 2026",
+            "Iranian OR Turkish OR Armenian founder startup seed funding 2026 US",
+            "immigrant founder robotics OR deep tech startup pre-seed 2026",
+            "refugee founder startup raised seed round 2026",
+        ],
+        "scrape_targets": [
+            # Immigrant-founder-focused funds — Geek's natural co-investors.
+            # New portfolio additions are fresh immigrant-led pre-seed/seed
+            # companies, usually before press. (Verified Oct 2026; Unshackled
+            # moved to unshackledvc.com and needs the headless fallback.)
+            "https://www.unshackledvc.com/portfolio",
+            "https://www.onewayvc.com/portfolio",
+            "https://www.flairvc.com/portfolio",
+            "https://redbud.vc/portfolio",
         ],
     },
 ]

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       vertical_index:
-        description: 'Vertical index (0-21), leave blank for day-of-year rotation'
+        description: 'Vertical index (0-22; 22 = Geek Ventures immigrant founders), leave blank for day-of-year rotation'
         required: false
         default: ''
       industry_query:
@@ -57,6 +57,8 @@ jobs:
           PIPELINE_MODEL: ${{ vars.PIPELINE_MODEL }}
           PIPELINE_MODEL_EXTRACT: ${{ vars.PIPELINE_MODEL_EXTRACT }}
           RESEARCH_MAX_QUERIES: ${{ vars.RESEARCH_MAX_QUERIES }}
+          # V22 founder-thesis vertical: cap on web-search founder checks per run (default 30).
+          FOUNDER_CHECK_MAX: ${{ vars.FOUNDER_CHECK_MAX }}
           # Scoring: every gate + Second Layer survivor >= WRITE_FLOOR_PCT (45) is written and
           # ranked; MIN_SCORE_PCT (64) tags "recommended". DEEP_ENRICH runs a web-search +
           # re-score on the top ENRICH_TOP_N (3).
