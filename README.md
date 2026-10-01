@@ -20,7 +20,7 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 
 ---
 
-## Verticals (V0–V21)
+## Verticals (V0–V22)
 
 ### Original Verticals (V0–V5)
 
@@ -79,6 +79,24 @@ The Second Layer Approach seeks to identify the "yet to be understood" impacts o
 - **Narrower scope:** four defined subsectors only — Siting & Permitting Intelligence, Interconnection & Grid Navigation, Financing/Transaction Infrastructure, Thermal/Cooling Optimization Software
 - **Tighter stage discipline:** target funding range is **$1.8M–$4M** (genuine seed), not the $15M ceiling used elsewhere in the pipeline — see [V21 Funding Range](#v21-funding-range-tighter-than-other-verticals) below
 - **Proprietary source architecture:** V21 is the only vertical with a `scrape_targets` field — see [Proprietary Sourcing Layer](#proprietary-sourcing-layer-v21-only) below
+
+### Fund-Thesis Vertical — Geek Ventures (V22)
+
+| ID | Vertical | Thesis |
+|----|----------|--------|
+| **V22** | Geek Ventures — Immigrant Founders (Sector-Agnostic) | Sourcing for [Geek Ventures](https://geek.vc) (NYC): immigrant founders who moved to the US are the priority, with underappreciated US-born founders also considered. Pre-seed and seed, from idea stage to $1.5M ARR. Needs a $10B+ fast-growing TAM, bold ideas and high scalability. Checks are $200k–$800k. |
+
+V22 filters on **who the founder is**, not on a sector, so it runs differently from V0–V21:
+
+- **Sources:** it skips the YC dataset, SEC Form D, Product Hunt and YC Launch HN (`skip_sources`). Those sources only allow sector keyword matching and have no founder data. Its `keywords` are founder-origin phrases ("immigrated", "moved to the US", "O-1", "born in"…) matched against TechCrunch funding coverage. Claude Research runs immigrant-founder queries across origin regions. The scrape layer diffs the portfolios of immigrant-founder funds that are Geek's natural co-investors: **Unshackled, One Way, Flair and Redbud**.
+- **Existing portfolio excluded:** candidates whose name or domain appears on `geek.vc/portfolio` are dropped.
+- **Founder check replaces the Second Layer filter.** `evaluate_founder_thesis_fit()` makes one web-search Claude call per candidate to research founder origins, stage/ARR, TAM and scalability. Origin is never inferred from a name. Scores:
+  - `3`: an immigrant founder is confirmed by a cited source
+  - `2`: underappreciated US-born founder, or immigrant origin likely but unconfirmed
+  - `1`: fail (dropped)
+
+  The research text is passed to the 9-factor scorer. The run is capped at `FOUNDER_CHECK_MAX` checks (default 30, roughly $0.05–0.10 each). Scrape-layer and research names are checked first.
+- **Funding band** (`funding_range`): in range ≤ $3M raised (no floor, because idea stage is welcome), above range $3M–$6M, rejected > $6M.
 
 ---
 
@@ -163,6 +181,7 @@ The sources above are press-and-announcement based — every fund scraping YC an
 | V17 Robotics | Eclipse, Lux |
 | V18 Elder Care | Primetime Partners, Ziegler Link-Age |
 | V20 Consumer CPG | XRC Labs, Springdale |
+| V22 Geek Ventures | Unshackled, One Way, Flair, Redbud (immigrant-founder funds) |
 | **V21** AI Physical Infra | DOE AI4IX/i2X, Powerhouse, Stepchange, MCJ, NYSERDA, Third Derivative, Elemental, Greentown, ERCOT, PJM (17 targets) |
 
 **Proven results (V21):** Glacian Technologies (Penn State tech-transfer), GridBoost / ContractPower (DOE AI4IX teaming list) — none would have surfaced through the standard sources.

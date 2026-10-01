@@ -229,7 +229,7 @@ def passes_all_gates(candidate: dict):
     return True, "all gates passed"
 
 
-def verify_size_post_enrichment(candidate: dict):
+def verify_size_post_enrichment(candidate: dict, funding_range: dict = None):
     """
     Second-layer SIZE filter, run AFTER funding enrichment/verification.
 
@@ -246,8 +246,15 @@ def verify_size_post_enrichment(candidate: dict):
       - "BELOW_RANGE" : below $1.8M (very early / pre-seed-ish) -> keep, flag as earliest-stage
       - "UNVERIFIED"  : still no real funding figure -> cannot confirm, flag for manual check
 
+    funding_range: optional per-vertical override {"floor", "ceiling", "max"} —
+    e.g. V22 (Geek Ventures) targets far earlier rounds than V21's $1.8M-$4M.
+
     Returns (status: str, reason: str).
     """
+    rng = funding_range or {}
+    hard_cap = rng.get("max", MAX_TOTAL_FUNDING)
+    floor = rng.get("floor", TARGET_FUNDING_FLOOR)
+    ceiling = rng.get("ceiling", TARGET_FUNDING_CEILING)
     total = safe_float(candidate.get("total_funding_usd", 0))
     confidence = (candidate.get("_funding_confidence") or "").lower()
     unverified = candidate.get("_funding_unverified", False)
@@ -262,26 +269,26 @@ def verify_size_post_enrichment(candidate: dict):
 
     # Real, verified figure exists — now enforce the hard cap that the initial
     # gate could not enforce when data was missing.
-    if total > MAX_TOTAL_FUNDING:
+    if total > hard_cap:
         return "REJECT", (
-            f"REJECT — verified funding ${total:,.0f} exceeds ${MAX_TOTAL_FUNDING:,.0f} "
+            f"REJECT — verified funding ${total:,.0f} exceeds ${hard_cap:,.0f} "
             f"hard cap (passed initial gate on missing/label data; real figure disqualifies)"
         )
 
-    if total > TARGET_FUNDING_CEILING:
+    if total > ceiling:
         return "ABOVE_RANGE", (
-            f"ABOVE target range — ${total:,.0f} is within the ${MAX_TOTAL_FUNDING:,.0f} cap "
-            f"but above the ${TARGET_FUNDING_CEILING:,.0f} thesis target; keep but flag as "
+            f"ABOVE target range — ${total:,.0f} is within the ${hard_cap:,.0f} cap "
+            f"but above the ${ceiling:,.0f} thesis target; keep but flag as "
             f"more de-risked / pricier entry"
         )
 
-    if total < TARGET_FUNDING_FLOOR:
+    if total < floor:
         return "BELOW_RANGE", (
-            f"BELOW target range — ${total:,.0f} is under ${TARGET_FUNDING_FLOOR:,.0f}; "
+            f"BELOW target range — ${total:,.0f} is under ${floor:,.0f}; "
             f"earliest-stage entry, relationship-build play"
         )
 
-    return "IN_RANGE", f"IN target range — ${total:,.0f} within ${TARGET_FUNDING_FLOOR:,.0f}-${TARGET_FUNDING_CEILING:,.0f} sweet spot"
+    return "IN_RANGE", f"IN target range — ${total:,.0f} within ${floor:,.0f}-${ceiling:,.0f} sweet spot"
 
 
 # ---------- Funding-report confirmation ----------
@@ -448,6 +455,11 @@ def score_candidate(ai_client: Anthropic, candidate: dict, sl_reason: str):
     site_block = f"\n\nFrom the company's own website:\n{site_text}\n" if site_text else ""
     deep = str(candidate.get("_deep_context", "")).strip()
     deep_block = f"\n\nResearched (sourced) — founders, funding, traction:\n{deep}\n" if deep else ""
+    # Founder-thesis verticals (V22) research founder backgrounds before scoring.
+    founder = str(candidate.get("_founder_context", "")).strip()
+    if founder:
+        deep_block += f"\n\nFounder background research (sourced):\n{founder}\n"
+    thesis_label = candidate.get("_thesis_label") or "Second Layer assessment"
     prompt = f"""Score this seed-stage company on 9 factors (1-10 each).
 
 Company: {candidate.get("name")}
@@ -457,7 +469,7 @@ Total raised: {raised_line}
 Headcount: {candidate.get("headcount", "unknown")}
 Founded: {founded}
 HQ: {candidate.get("hq_city", "")}, {candidate.get("hq_country", "")}
-Second Layer assessment: {sl_reason}{site_block}{deep_block}
+{thesis_label}: {sl_reason}{site_block}{deep_block}
 
 Score each factor 1-10 using the anchors. If the evidence for a factor is
 genuinely missing, score it 4 (not 5) and say so in RISKS — thin data is a real

@@ -66,6 +66,13 @@ VERTICAL_TAB = "Vertical Pipeline"
 # vertical data separate from ad-hoc industry requests.
 ON_DEMAND_TAB = "On-Demand Pipeline"
 
+# Founder-thesis verticals (V22) spend one web-search call per candidate on
+# founder research (~$0.05-0.10 each). Cap per run; the rest wait for a later run.
+try:
+    FOUNDER_CHECK_MAX = int(os.environ.get("FOUNDER_CHECK_MAX", "30"))
+except ValueError:
+    FOUNDER_CHECK_MAX = 30
+
 # Extra early-signal sources (YC Launches, Product Hunt, VC newsletters) run in
 # STEP 1 unless EXTRA_SOURCES=0.
 EXTRA_SOURCES_ENABLED = os.environ.get("EXTRA_SOURCES", "1").strip() != "0"
@@ -520,16 +527,25 @@ def source_extra(vertical: dict) -> list:
       (same recency bar the main YC source applies).
     - VC newsletter feeds are run through source_vertical_rss(), which already
       does "<Company> raises $<N>" headline extraction + seed-stage filtering.
+    - A vertical's "skip_sources" can drop "yc_launches" / "producthunt".
     """
     name = vertical["name"]
+    skip = set(vertical.get("skip_sources") or ())
     out = []
 
-    yc = [_adapt_extra_record(r, name) for r in source_yc_launches(vertical)]
-    yc = [c for c in yc if not c["yc_batch"] or c["yc_batch"] in RECENT_YC_BATCHES]
-    print(f"[YC Launches] {len(yc)} candidates")
+    yc, ph = [], []
+    if "yc_launches" in skip:
+        print("[YC Launches] skipped for this vertical")
+    else:
+        yc = [_adapt_extra_record(r, name) for r in source_yc_launches(vertical)]
+        yc = [c for c in yc if not c["yc_batch"] or c["yc_batch"] in RECENT_YC_BATCHES]
+        print(f"[YC Launches] {len(yc)} candidates")
 
-    ph = [_adapt_extra_record(r, name) for r in source_producthunt(vertical)]
-    print(f"[Product Hunt] {len(ph)} candidates")
+    if "producthunt" in skip:
+        print("[Product Hunt] skipped for this vertical")
+    else:
+        ph = [_adapt_extra_record(r, name) for r in source_producthunt(vertical)]
+        print(f"[Product Hunt] {len(ph)} candidates")
 
     nl = source_vertical_rss(VC_NEWSLETTER_FEEDS, name)
     print(f"[VC Newsletters] {len(nl)} candidates")
@@ -1907,6 +1923,107 @@ Return ONLY: SCORE: N | REASON: one short sentence"""
         return 1, "consumer Second Layer eval failed (LLM error) — excluded"
 
 
+def exclude_fund_portfolio(candidates: list, portfolio_url: str) -> list:
+    """Drop candidates already in the fund's own portfolio (e.g. geek.vc/portfolio).
+    Plain name match against the page text — no Claude call. Names under 4
+    chars are never matched (too many false hits). Fails open if the page
+    can't be fetched."""
+    page = _fetch_page_text(portfolio_url).lower()
+    if len(page) < 250:
+        print(f"[portfolio exclude] could not read {portfolio_url} — skipping exclusion")
+        return candidates
+    kept = []
+    for c in candidates:
+        nm = re.sub(r",?\s*(inc|llc|corp|co)\.?$", "", str(c.get("name", "")).strip(), flags=re.I).lower()
+        # The page often lists a company by domain ("bowlton.com"), so match the
+        # candidate's own domain too (press-article links are not its domain).
+        dom = re.sub(r"^(https?://)?(www\.)?", "", str(c.get("website", "")).lower()).split("/")[0]
+        hit_name = len(nm) >= 4 and re.search(r"(?<![a-z0-9])" + re.escape(nm) + r"(?![a-z0-9])", page)
+        hit_dom = "." in dom and len(dom) >= 6 and re.search(r"(?<![a-z0-9.])" + re.escape(dom) + r"(?![a-z0-9])", page)
+        if hit_name or hit_dom:
+            print(f"  already in portfolio: {c.get('name')}")
+            continue
+        kept.append(c)
+    return kept
+
+
+def evaluate_founder_thesis_fit(ai_client, candidate: dict, vertical: dict):
+    """Founder-thesis filter for verticals with "thesis": "founder" (V22, Geek
+    Ventures). Replaces the Second Layer filter: researches the founders with
+    web search, then rates fit against the vertical's fund_profile.
+
+    Returns (score, reason, research_text):
+      0 = not an operating company
+      1 = fails (no immigrant/underappreciated founder signal, sub-$10B TAM,
+          not scalable, or already past seed / ~$1.5M ARR)
+      2 = passes — underappreciated US-born founder, or immigrant status
+          plausible but not confirmed by a source
+      3 = strong — a founder is confirmed (sourced) as an immigrant to the US
+    Fails CLOSED (score 1) on an LLM error.
+    """
+    fp = vertical.get("fund_profile") or {}
+    profile = "\n".join(f"- {k}: {v}" for k, v in fp.items())
+    nm = candidate.get("name", "")
+    site = candidate.get("website", "")
+    prompt = f"""You are screening a startup for an early-stage VC fund with this profile:
+{profile}
+
+Company: {nm}
+Website: {site or "unknown"}
+Description: {str(candidate.get("description", ""))[:600]}
+Sourced via: {candidate.get("_source", "")}
+
+Research the company and its founders with web search (founder LinkedIn,
+press, the company's about/team page, accelerator profiles). Find:
+1. Founder names, and for each: where they were born/raised and whether they
+   moved to the US (immigrant), with a source. Do NOT infer origin from a
+   name or ethnicity — only from a stated fact (e.g. "grew up in Kyiv",
+   "came to the US on an O-1", "born in Lagos", degree abroad then moved).
+2. Whether the founder is underappreciated (non-traditional path, outside
+   elite networks) if US-born.
+3. Stage / traction: pre-seed or seed? any ARR above ~$1.5M or Series A?
+4. Market: is the TAM plausibly $10B+ and fast-growing? Is the model highly
+   scalable (software/platform/product), not a services shop or local business?
+
+Rate fit:
+0 = not an operating, venture-backable company (fund, program, nonprofit…)
+1 = fails: no immigrant or underappreciated-founder signal found, OR TAM
+    clearly under $10B, OR not scalable, OR already past seed / >$1.5M ARR
+2 = passes: underappreciated US-born founder, OR immigrant origin likely
+    but not confirmed by a source — market and scale criteria met
+3 = strong: at least one founder CONFIRMED (sourced) as an immigrant to the
+    US, and market and scale criteria met
+
+Write a short research summary (founders + origins with sources, stage,
+market), then end with exactly one line:
+FIT: N | ORIGIN: <e.g. "Ukraine -> NYC (CEO)", "US-born", or "unknown"> | REASON: <max 25 words>"""
+    tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        resp = None
+        for _ in range(4):  # allow pause_turn continuations
+            resp = ai_client.messages.create(model=MODEL, max_tokens=1500,
+                                             tools=tools, messages=messages)
+            if resp.stop_reason != "pause_turn":
+                break
+            messages.append({"role": "assistant", "content": resp.content})
+        text = "".join(b.text for b in resp.content
+                       if getattr(b, "type", "") == "text").strip()
+    except Exception as e:
+        record_llm_error(f"founder thesis eval for {nm}", e)
+        return 1, "founder thesis eval failed (LLM error) — excluded", ""
+
+    m = re.search(r"FIT:\s*([0-3])\s*\|\s*ORIGIN:\s*(.*?)\s*\|\s*REASON:\s*(.+)", text, re.I)
+    if not m:
+        record_llm_error(f"founder thesis eval for {nm}",
+                         ValueError(f"no FIT line in response: {text[-120:]!r}"))
+        return 1, "founder thesis eval unparseable — excluded", ""
+    score, origin, reason = int(m.group(1)), m.group(2).strip(), m.group(3).strip()
+    research = text[:m.start()].strip()[:2500]
+    label = {3: "Immigrant founder", 2: "Founder fit (unconfirmed origin / underappreciated)"}.get(score, "Fails founder thesis")
+    return score, f"{label} — {origin}: {reason}"[:300], research
+
+
 def _funding_line(cand: dict) -> str:
     val = safe_float(cand.get("total_funding_usd", 0))
     conf = (cand.get("_funding_confidence") or "").lower()
@@ -2070,8 +2187,15 @@ def main():
     print("STEP 1: Pulling from vertical-specific sources")
     print("-" * 60)
     candidates = []
-    candidates.extend(source_vertical_yc(keywords, name))
-    candidates.extend(source_sec_form_d(keywords, name))
+    skip_sources = set(vertical.get("skip_sources") or ())
+    if "yc" in skip_sources:
+        print("[YC] skipped for this vertical")
+    else:
+        candidates.extend(source_vertical_yc(keywords, name))
+    if "sec_form_d" in skip_sources:
+        print("[SEC Form D] skipped for this vertical")
+    else:
+        candidates.extend(source_sec_form_d(keywords, name))
     candidates.extend(source_techcrunch(keywords, name))
     candidates.extend(source_vertical_rss(rss_feeds, name))
     candidates.extend(source_vertical_claude_research(ai_client, search_terms, name))
@@ -2090,6 +2214,9 @@ def main():
     existing = read_existing_names(sheet_client, target_tab)
     candidates = deduplicate(candidates, existing)
     print(f"After dedup: {len(candidates)}")
+    if vertical.get("exclude_portfolio_url"):
+        candidates = exclude_fund_portfolio(candidates, vertical["exclude_portfolio_url"])
+        print(f"After excluding existing fund portfolio: {len(candidates)}")
 
     # Step 1b: Verify funding for $0 candidates before gating
     print("\nSTEP 1b: Verifying zero-funding candidates")
@@ -2137,7 +2264,7 @@ def main():
     print("-" * 60)
     size_verified = []
     for c in passed:
-        status, reason = verify_size_post_enrichment(c)
+        status, reason = verify_size_post_enrichment(c, vertical.get("funding_range"))
         c["_size_status"] = status
         if status == "REJECT":
             print(f"  REMOVED: {c.get('name', '?')} — {reason}")
@@ -2161,7 +2288,31 @@ def main():
     print("-" * 60)
     passed_sl = []
     is_consumer_vertical = (idx == 20)
-    if is_consumer_vertical and SKIP_SECOND_LAYER_FOR_V20:
+    is_founder_thesis = vertical.get("thesis") == "founder"
+    if is_founder_thesis:
+        # V22-style: the filter is WHO the founder is. One web-search call per
+        # candidate, so cap it — scrape-layer + Claude-research names first
+        # (highest prior of an immigrant founder), press-sourced names after.
+        prio = lambda c: 0 if c.get("_from_scrape") else (1 if "Research" in str(c.get("_source", "")) else 2)
+        queue = sorted(passed, key=prio)
+        if len(queue) > FOUNDER_CHECK_MAX:
+            print(f"  founder check capped at {FOUNDER_CHECK_MAX} (FOUNDER_CHECK_MAX); "
+                  f"{len(queue) - FOUNDER_CHECK_MAX} deferred to a later run")
+            queue = queue[:FOUNDER_CHECK_MAX]
+        for c in queue:
+            fit, reason, context = evaluate_founder_thesis_fit(ai_client, c, vertical)
+            print(f"  [{fit}] {c.get('name', '?'):30s} {reason[:110]}")
+            if fit == 0:
+                if c.get("_from_scrape"):
+                    scrape_done.add(_norm_company(c.get("name", "")))
+                continue
+            if fit < 2:
+                continue
+            c["_sl_reason"] = reason
+            c["_founder_context"] = context
+            c["_thesis_label"] = "Founder / fund-thesis assessment"
+            passed_sl.append(c)
+    elif is_consumer_vertical and SKIP_SECOND_LAYER_FOR_V20:
         print("Vertical 20 (Consumer): skipping Second Layer filter entirely")
         for c in passed:
             c["_sl_reason"] = "Consumer vertical — filter skipped, see vertical-specific thesis"
