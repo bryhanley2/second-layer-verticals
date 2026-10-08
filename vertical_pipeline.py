@@ -1345,7 +1345,7 @@ except ValueError:
     MAP_PER_LAYER = 6
 
 
-def _classify_into_layers(ai_client, layers: list, companies: list) -> dict:
+def _classify_into_layers(ai_client, layers: list, companies: list, trend: str = "") -> dict:
     """{company_name: (layer_id, public_blurb)} — one cheap call per chunk.
     Companies that fit no layer are omitted."""
     out = {}
@@ -1358,7 +1358,7 @@ def _classify_into_layers(ai_client, layers: list, companies: list) -> dict:
             for n, c in enumerate(chunk)
         )
         prompt = (
-            "Problem layers of one trend (the AI compute buildout):\n"
+            f"Problem layers of one trend ({trend or 'the trend'}):\n"
             f"{layer_lines}\n\n"
             "For each company below, pick the ONE layer it primarily addresses, and "
             "write a neutral 8-to-14-word description of what it does (public-facing, "
@@ -1450,7 +1450,7 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
         print(f"[map] no companies for this vertical scored >= {MAP_MIN_SCORE}")
         return
 
-    placed = _classify_into_layers(ai_client, layers, companies)
+    placed = _classify_into_layers(ai_client, layers, companies, trend)
     if not placed:
         print("[map] classifier placed nothing")
         return

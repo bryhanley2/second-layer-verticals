@@ -696,6 +696,141 @@ SECOND_LAYER_MAPS = {
             },
         ],
     },
+    # --- DRAFT maps: layer lists are thesis statements — reword freely. ---
+    13: {
+        "trend": "The rise of autonomous AI agents",
+        "trend_blurb": (
+            "Software is starting to act on its own — browsing, buying, writing code, "
+            "calling other systems. Every new autonomous actor needs identity, limits, "
+            "oversight, and a way to be held accountable."
+        ),
+        "layers": [
+            {
+                "id": "identity",
+                "name": "Identity & permissions",
+                "problem": (
+                    "Agents act on behalf of people and companies, but existing identity "
+                    "and access systems were built for humans. Who is the agent, and what may it do?"
+                ),
+            },
+            {
+                "id": "observability",
+                "name": "Observability & evaluation",
+                "problem": (
+                    "Agents fail in non-deterministic ways. Teams need tracing, testing, "
+                    "and evals to know whether an agent is actually doing its job."
+                ),
+            },
+            {
+                "id": "payments",
+                "name": "Agent payments & commerce",
+                "problem": (
+                    "Agents that transact need spending limits, credentials, and "
+                    "machine-readable ways to pay and be paid."
+                ),
+            },
+            {
+                "id": "audit",
+                "name": "Audit, liability & control",
+                "problem": (
+                    "When an agent causes harm or error, there must be a record of what it "
+                    "did and why, plus guardrails that stop it before it does."
+                ),
+            },
+            {
+                "id": "integration",
+                "name": "Tooling & integration",
+                "problem": (
+                    "Agents are only as useful as the systems they can reach. Connecting "
+                    "them safely to enterprise data and software is unsolved plumbing."
+                ),
+            },
+        ],
+    },
+    12: {
+        "trend": "The flood of synthetic content",
+        "trend_blurb": (
+            "Generative AI has made realistic text, voice, images, and video nearly free "
+            "to produce. Trust in what is real — and defence against AI-enabled attacks — "
+            "becomes the scarce resource."
+        ),
+        "layers": [
+            {
+                "id": "provenance",
+                "name": "Provenance & authenticity",
+                "problem": (
+                    "Proving where media came from and whether it was altered — "
+                    "watermarks, signatures, and chain-of-custody for content."
+                ),
+            },
+            {
+                "id": "detection",
+                "name": "Deepfake & fraud detection",
+                "problem": (
+                    "Cloned voices and synthetic faces defeat identity checks and "
+                    "enable fraud. Detecting them in real time is an arms race."
+                ),
+            },
+            {
+                "id": "redteam",
+                "name": "Model red-teaming & security",
+                "problem": (
+                    "Deployed models can be jailbroken, poisoned, or made to leak data. "
+                    "Testing and defending them needs continuous, automated tooling."
+                ),
+            },
+            {
+                "id": "brand",
+                "name": "Brand & impersonation defence",
+                "problem": (
+                    "Organizations and executives are impersonated at scale. Monitoring "
+                    "and takedown has to match the speed of generation."
+                ),
+            },
+        ],
+    },
+    19: {
+        "trend": "The quantum threat to encryption",
+        "trend_blurb": (
+            "Quantum computers will eventually break the cryptography that protects "
+            "nearly all data. Data stolen today can be decrypted later, so the migration "
+            "has to start long before the machines arrive."
+        ),
+        "layers": [
+            {
+                "id": "inventory",
+                "name": "Cryptographic inventory",
+                "problem": (
+                    "Most organizations do not know where they use vulnerable cryptography. "
+                    "Discovering and cataloguing it is the first, manual step."
+                ),
+            },
+            {
+                "id": "migration",
+                "name": "Migration & crypto-agility",
+                "problem": (
+                    "Replacing algorithms across systems, devices, and vendors without "
+                    "downtime requires orchestration and the ability to swap crypto quickly."
+                ),
+            },
+            {
+                "id": "keys",
+                "name": "Key management & hardware",
+                "problem": (
+                    "Post-quantum keys and certificates are larger and behave differently, "
+                    "stressing existing key management and embedded hardware."
+                ),
+            },
+            {
+                "id": "compliance",
+                "name": "Compliance & assurance",
+                "problem": (
+                    "Government mandates and standards are arriving. Proving readiness "
+                    "to regulators, customers, and auditors needs reporting tooling."
+                ),
+            },
+        ],
+    },
 }
 
 
