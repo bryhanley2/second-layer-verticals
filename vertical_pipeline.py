@@ -1331,7 +1331,7 @@ def _watchlist_digest(moved: list) -> str:
 _MAP_TAB = "Second Layer Map"
 _MAP_HEADERS = [
     "Trend", "Trend Blurb", "Layer Order", "Layer ID", "Layer", "Problem",
-    "Company", "Blurb", "Stage", "Website", "Updated", "Hide",
+    "Company", "Blurb", "Stage", "Website", "Founders", "Updated", "Hide",
 ]
 # The public map is an outreach artifact, not the full board. Only companies that
 # cleared a real quality score go on it, and each layer is capped.
@@ -1389,6 +1389,20 @@ def _classify_into_layers(ai_client, layers: list, companies: list) -> dict:
     return out
 
 
+_MAP_FOUNDER_UNKNOWN_RE = re.compile(
+    r"unverified|needs manual lookup|not found|^n/?a$|^unknown$|^-+$|^tbd$", re.I
+)
+
+
+def _public_founders(raw) -> str:
+    """Founder names for the PUBLIC map — never the internal 'UNVERIFIED /
+    needs manual lookup' placeholder. Blank means omit the line entirely."""
+    s = str(raw or "").strip()
+    if not s or _MAP_FOUNDER_UNKNOWN_RE.search(s):
+        return ""
+    return s[:200]
+
+
 def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label: str) -> None:
     """Project this vertical's written companies onto its public problem-layer
     taxonomy and (re)write the trend's rows in the 'Second Layer Map' tab."""
@@ -1427,6 +1441,7 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
             "summary": str(r.get("Summary", "") or ""),
             "stage": str(r.get("Stage", "") or ""),
             "website": str(r.get("Website", "") or ""),
+            "founders": _public_founders(r.get("Founders", "")),
             "score": score,
         })
     companies.sort(key=lambda c: c["score"], reverse=True)
@@ -1468,7 +1483,7 @@ def build_second_layer_map(ai_client, sheet_client, vertical_id, vertical_label:
         l = by_id[lid]
         per_layer.setdefault(lid, []).append([
             trend, spec["trend_blurb"], layers.index(l), lid, l["name"], l["problem"],
-            c["name"], blurb, c["stage"], c["website"], now,
+            c["name"], blurb, c["stage"], c["website"], c["founders"], now,
             hide_by_name.get(_norm_company(c["name"]), ""),
         ])
     new_rows = [row for lid in per_layer for row in per_layer[lid]]
