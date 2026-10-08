@@ -40,8 +40,9 @@ except ValueError:
     WRITE_FLOOR_PCT = 45
 
 # Anthropic model for judgement-heavy calls — scoring, Second Layer eval, funding
-# verification, vertical synthesis. Keep this capable. Override with PIPELINE_MODEL.
-MODEL = os.environ.get("PIPELINE_MODEL") or "claude-opus-4-7"
+# verification, vertical synthesis. Sonnet 5 handles the anchored rubric well and
+# is ~5x cheaper than Opus. Set PIPELINE_MODEL=claude-opus-4-7 for a max-quality run.
+MODEL = os.environ.get("PIPELINE_MODEL") or "claude-sonnet-5"
 
 # Cheaper model for the mechanical scrape-extraction step (pull company names out
 # of a page — no judgement). ~5x cheaper; override with PIPELINE_MODEL_EXTRACT.
