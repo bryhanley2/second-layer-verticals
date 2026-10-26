@@ -252,6 +252,20 @@ VERTICALS = [
             "AI security red teaming startup seed funding",
             "deepfake detection content provenance seed round",
             "LLM security prompt injection startup seed funding",
+            "AI agent security identity guardrails startup seed round",
+            "synthetic voice deepfake fraud detection startup pre-seed seed",
+            "AI model supply chain security data poisoning startup funding",
+            "AI red teaming automated adversarial testing platform seed",
+            "executive impersonation brand protection AI startup seed funding",
+            "content credentials C2PA media authenticity startup funding",
+            "AI governance runtime security enterprise LLM startup seed round",
+        ],
+        "scrape_targets": [
+            # security-specialist fund portfolios — new additions surface before press
+            "https://www.ylventures.com/portfolio",
+            "https://www.team8.vc/portfolio",
+            "https://cyberstarts.com/portfolio/",
+            "https://www.evolutionequity.com/portfolio",
         ],
     },
     {
@@ -263,12 +277,22 @@ VERTICALS = [
             "AI agent infrastructure startup seed funding 2026",
             "agent authentication payments orchestration seed round",
             "agentic workflow tooling startup seed funding",
+            "AI agent observability evaluation monitoring startup seed round",
+            "MCP model context protocol infrastructure startup funding",
+            "AI agent identity access management startup seed",
+            "agent-to-agent payments commerce infrastructure startup funding",
+            "AI agent sandbox runtime browser infrastructure seed round",
+            "enterprise AI agent governance audit trail startup seed funding",
+            "AI agent memory context data layer startup pre-seed seed",
         ],
         "scrape_targets": [
             # specialist-fund portfolios / accelerator cohorts for this vertical;
             # diffed run-over-run so new additions surface before venture press
             "https://airstreet.com/portfolio",
             "https://www.basis.vc/",
+            "https://www.boldstart.vc/portfolio",
+            "https://www.heavybit.com/portfolio",
+            "https://www.haystack.vc/portfolio",
         ],
     },
     {
@@ -358,6 +382,18 @@ VERTICALS = [
             "post-quantum cryptography startup seed funding",
             "quantum-safe encryption migration seed round",
             "cryptographic inventory discovery startup seed funding",
+            "crypto-agility key management post-quantum startup seed round",
+            "quantum-safe VPN network encryption startup funding",
+            "cryptographic bill of materials CBOM startup",
+            "post-quantum hardware security module PQC chip startup seed",
+            "quantum random number generation QKD startup seed funding",
+            "NIST FIPS 203 migration compliance tooling startup funding",
+            "harvest now decrypt later data protection startup seed",
+        ],
+        "scrape_targets": [
+            "https://www.quantonation.com/portfolio",
+            "https://www.ylventures.com/portfolio",
+            "https://www.team8.vc/portfolio",
         ],
     },
     {
