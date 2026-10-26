@@ -47,7 +47,8 @@ import requests
 import feedparser
 from urllib.parse import urljoin
 from pipeline_utils import (
-    get_sheet_client, get_anthropic_client, SHEET_ID, MODEL, MODEL_EXTRACT,
+    get_sheet_client, get_anthropic_client, SHEET_ID, MODEL, MODEL_EXTRACT, MODEL_SCORE,
+    response_text,
     passes_all_gates, evaluate_second_layer_fit, score_candidate,
     verify_size_post_enrichment, confirm_funding_report,
     decision_from_score, write_scored_candidates, read_existing_names,
@@ -101,14 +102,45 @@ try:
 except ValueError:
     RESEARCH_MAX_QUERIES = 12
 
+# Web-grounded sourcing + verification. Both used to be answered from the model's
+# memory (no tools), which is where stale/invented companies and "no citable
+# source" funding results came from. With these on, each call can run live web
+# searches ($10 per 1,000 searches). Set either to 0 to fall back to memory-only.
+RESEARCH_WEB_SEARCH = (os.environ.get("RESEARCH_WEB_SEARCH") or "1").strip() != "0"
+FUNDING_WEB_SEARCH = (os.environ.get("FUNDING_WEB_SEARCH") or "1").strip() != "0"
+try:
+    RESEARCH_SEARCH_USES = int(os.environ.get("RESEARCH_SEARCH_USES") or "3")
+except ValueError:
+    RESEARCH_SEARCH_USES = 3
+try:
+    FUNDING_SEARCH_USES = int(os.environ.get("FUNDING_SEARCH_USES") or "10")
+except ValueError:
+    FUNDING_SEARCH_USES = 10
+
+
+def _web_text(ai_client, prompt: str, model: str, max_uses: int, max_tokens: int = 2500) -> str:
+    """One web-search-backed call. Handles pause_turn continuations and returns
+    the joined text blocks (citations stripped to plain text)."""
+    tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": max_uses}]
+    messages = [{"role": "user", "content": prompt}]
+    resp = None
+    for _ in range(5):
+        resp = ai_client.messages.create(model=model, max_tokens=max_tokens,
+                                         tools=tools, messages=messages)
+        if resp.stop_reason != "pause_turn":
+            break
+        messages.append({"role": "assistant", "content": resp.content})
+    return response_text(resp)
+
+
 # Deep enrichment: for the top-scoring candidates only, one Claude web-search
 # call to pull sourced founders / funding / traction, then re-score. Keeps cost
 # down (a few calls/run) while the best candidates get real data.
 DEEP_ENRICH = os.environ.get("DEEP_ENRICH", "1").strip() != "0"
 try:
-    ENRICH_TOP_N = int(os.environ.get("ENRICH_TOP_N") or "3")
+    ENRICH_TOP_N = int(os.environ.get("ENRICH_TOP_N") or "8")
 except ValueError:
-    ENRICH_TOP_N = 3
+    ENRICH_TOP_N = 8
 
 # Outreach digest: scrape each top candidate's website for a public email
 # (ENRICH_CONTACTS=0 to skip) and send that many in the email digest.
@@ -446,12 +478,18 @@ Format each as JSON on a single line:
 Do NOT include placeholder or made-up companies. If uncertain about whether a company
 is real, skip it entirely. Return ONLY JSON lines, nothing else."""
         try:
-            response = ai_client.messages.create(
-                model=MODEL,
-                max_tokens=1500,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = response.content[0].text.strip()
+            if RESEARCH_WEB_SEARCH:
+                text = _web_text(ai_client, prompt + "\n\nUse web search to find companies "
+                                 "that exist TODAY (recent funding news, launches, portfolio "
+                                 "pages). Only list companies you actually found in results.",
+                                 MODEL, RESEARCH_SEARCH_USES, max_tokens=2500)
+            else:
+                response = ai_client.messages.create(
+                    model=MODEL,
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = response_text(response)
             for line in text.split("\n"):
                 line = line.strip()
                 if not line.startswith("{"):
@@ -711,7 +749,7 @@ Return ONE JSON object per line and nothing else:
             model=MODEL_EXTRACT, max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = resp.content[0].text.strip()
+        text = response_text(resp)
     except Exception as e:
         record_llm_error(f"scrape extraction {url}", e)
         return []
@@ -1795,11 +1833,16 @@ Companies: {json.dumps(names)}
 
 Return ONLY a JSON object mapping each company name to its fields. No preamble."""
     try:
-        resp = ai_client.messages.create(
-            model=MODEL, max_tokens=1600,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = resp.content[0].text.strip()
+        if FUNDING_WEB_SEARCH:
+            text = _web_text(ai_client, prompt + "\n\nYou have a web search tool: search for each "
+                             "company's most recent funding announcement and cite the URL you "
+                             "actually read.", MODEL, FUNDING_SEARCH_USES, max_tokens=3000)
+        else:
+            resp = ai_client.messages.create(
+                model=MODEL, max_tokens=1600,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response_text(resp)
         text = text[text.find("{"):text.rfind("}") + 1] if "{" in text else text
         verified = json.loads(text)
     except Exception as e:
@@ -1919,7 +1962,7 @@ Return ONLY: SCORE: N | REASON: one short sentence"""
             model=MODEL, max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = resp.content[0].text.strip()
+        text = response_text(resp)
         score = 2
         reason = ""
         for line in text.replace("|", "\n").split("\n"):
@@ -2073,7 +2116,7 @@ def _deep_enrich(ai_client, candidate: dict) -> str:
     try:
         resp = None
         for _ in range(4):  # allow pause_turn continuations
-            resp = ai_client.messages.create(model=MODEL, max_tokens=1500,
+            resp = ai_client.messages.create(model=MODEL_SCORE, max_tokens=2500,
                                              tools=tools, messages=messages)
             if resp.stop_reason != "pause_turn":
                 break

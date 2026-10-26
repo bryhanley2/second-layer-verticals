@@ -39,14 +39,31 @@ try:
 except ValueError:
     WRITE_FLOOR_PCT = 45
 
-# Anthropic model for judgement-heavy calls — scoring, Second Layer eval, funding
-# verification, vertical synthesis. Sonnet 5 handles the anchored rubric well and
-# is ~5x cheaper than Opus. Set PIPELINE_MODEL=claude-opus-4-7 for a max-quality run.
-MODEL = os.environ.get("PIPELINE_MODEL") or "claude-sonnet-5"
+# Anthropic model for the bulk of the calls — sourcing research, Second Layer eval,
+# funding verification, vertical synthesis. Sonnet 5.5 ($2/$10 per MTok) handles
+# the anchored rubric well and is far cheaper than Opus.
+MODEL = os.environ.get("PIPELINE_MODEL") or "claude-sonnet-5-5"
+
+# Model for the two decisions that end up on the board: the 9-factor score and the
+# deep research on the top candidates. Defaults to MODEL; set
+# PIPELINE_MODEL_SCORE=claude-opus-5-5 ($4/$20) to spend extra credits where
+# judgement quality matters most (~40 scoring calls per run, so a few dollars).
+MODEL_SCORE = os.environ.get("PIPELINE_MODEL_SCORE") or MODEL
 
 # Cheaper model for the mechanical scrape-extraction step (pull company names out
 # of a page — no judgement). ~5x cheaper; override with PIPELINE_MODEL_EXTRACT.
 MODEL_EXTRACT = os.environ.get("PIPELINE_MODEL_EXTRACT") or "claude-haiku-4-5"
+
+def response_text(resp) -> str:
+    """Concatenate the text blocks of a Messages response.
+
+    Sonnet 5/5.5 and Opus 5.5 think by default, so content[0] can be a thinking
+    block with no .text. Join only the text blocks instead of indexing [0]."""
+    return "".join(
+        b.text for b in (getattr(resp, "content", None) or [])
+        if getattr(b, "type", "") == "text"
+    ).strip()
+
 
 ALLOWED_STAGES = {
     "pre-seed", "preseed", "pre_seed", "seed",
@@ -421,10 +438,10 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
     try:
         response = ai_client.messages.create(
             model=MODEL,
-            max_tokens=100,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.content[0].text.strip()
+        text = response_text(response)
         if text.lstrip().startswith("0") or "NOT-A-COMPANY" in text.upper():
             return 0, text.split("|", 1)[-1].strip()[:120] or "not an operating company"
         # Claude sometimes prefixes "SCORE: 3 | ..." or "Score|..." — pull the
@@ -520,11 +537,11 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
 
     try:
         response = ai_client.messages.create(
-            model=MODEL,
-            max_tokens=500,
+            model=MODEL_SCORE,
+            max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.content[0].text.strip()
+        text = response_text(response)
         scores = {}
         meta = {"summary": "", "strengths": "", "risks": "", "founders": ""}
 

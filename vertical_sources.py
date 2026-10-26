@@ -422,7 +422,7 @@ VERTICALS = [
         "rss_feeds": [
             # TRUE RSS FEEDS ONLY — safe for a standard feed parser.
             "https://www.canarymedia.com/feed",
-            "https://www.latitudemedia.com/news/rss.xml",
+            "https://www.latitudemedia.com/feed",
             "https://www.utilitydive.com/feeds/news/",
             "https://www.datacenterdynamics.com/en/rss/",
         ],
@@ -466,7 +466,7 @@ VERTICALS = [
             # --- Regional / state program cohorts (NY-local, relationship-buildable) ---
             "https://www.nyserda.ny.gov/All-Programs/Innovation-Programs",
             "https://urbanfuturelab.org/portfolio/",
-            "https://www.thecleanfight.com/portfolio",
+            "https://thecleanfight.com/companies/all-companies",
 
             # --- Specialist accelerator cohorts ---
             # NOTE: heavy hardware skew (e.g. Third Derivative's 2026 cohort was ~90%
@@ -943,7 +943,7 @@ Rules:
         model=model, max_tokens=1200,
         messages=[{"role": "user", "content": prompt}],
     )
-    text = resp.content[0].text.strip()
+    text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
     if text.startswith("```"):
         text = text.strip("`")
         text = text[4:].strip() if text.lower().startswith("json") else text.strip()
