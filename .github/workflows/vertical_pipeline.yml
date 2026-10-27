@@ -66,6 +66,7 @@ jobs:
           WRITE_FLOOR_PCT: ${{ vars.WRITE_FLOOR_PCT }}
           DEEP_ENRICH: ${{ vars.DEEP_ENRICH }}
           ENRICH_TOP_N: ${{ vars.ENRICH_TOP_N }}
+          ENRICH_MIN_PCT: ${{ vars.ENRICH_MIN_PCT }}
           # Optional: set repo variable EXTRA_SOURCES to "0" to skip YC Launches / Product Hunt / VC newsletters.
           EXTRA_SOURCES: ${{ vars.EXTRA_SOURCES }}
           # Optional: SCRAPE_LAYER="0" skips the scrape layer; SCRAPE_MAX_NEW caps new companies per run;

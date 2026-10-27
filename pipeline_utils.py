@@ -44,10 +44,10 @@ except ValueError:
 # the anchored rubric well and is far cheaper than Opus.
 MODEL = os.environ.get("PIPELINE_MODEL") or "claude-sonnet-5-5"
 
-# Model for the two decisions that end up on the board: the 9-factor score and the
-# deep research on the top candidates. Defaults to MODEL; set
-# PIPELINE_MODEL_SCORE=claude-opus-5-5 ($4/$20) to spend extra credits where
-# judgement quality matters most (~40 scoring calls per run, so a few dollars).
+# Model for the FINAL score of the shortlist (the re-score after deep research —
+# the number that decides what gets recommended). The first-pass score of every
+# candidate uses MODEL. Defaults to MODEL; set PIPELINE_MODEL_SCORE=claude-opus-5-5
+# ($4/$20) to spend credits only where judgement quality matters (a handful of calls).
 MODEL_SCORE = os.environ.get("PIPELINE_MODEL_SCORE") or MODEL
 
 # Cheaper model for the mechanical scrape-extraction step (pull company names out
@@ -107,8 +107,74 @@ def get_sheet_client():
     return gspread.authorize(creds)
 
 
+# ---------- Cost meter ----------
+# Every Messages call made through the client from get_anthropic_client() is
+# tallied by pipeline stage, so a run ends with a table of where the credits went.
+# $ per million tokens (input, output); web search is $0.01 per search.
+_PRICES = {
+    "claude-opus-5-5": (4.0, 20.0), "claude-opus-5": (5.0, 25.0), "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0), "claude-sonnet-5-5": (2.0, 10.0), "claude-sonnet-5": (2.0, 10.0),
+    "claude-sonnet-4-6": (3.0, 15.0), "claude-haiku-5-5": (0.10, 0.50), "claude-haiku-4-5": (1.0, 5.0),
+}
+_SEARCH_USD = 0.01
+_STAGE = ["setup"]
+_COST: dict = {}
+
+
+def set_stage(name: str) -> None:
+    """Label the calls that follow (shown in the end-of-run cost table)."""
+    _STAGE[0] = name
+
+
+def _track_usage(resp, model: str) -> None:
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return
+    pin, pout = _PRICES.get(model, (2.0, 10.0))  # unknown model: assume Sonnet pricing
+    tin = (getattr(u, "input_tokens", 0) or 0)
+    tcr = (getattr(u, "cache_creation_input_tokens", 0) or 0)
+    tcw = (getattr(u, "cache_read_input_tokens", 0) or 0)
+    tout = (getattr(u, "output_tokens", 0) or 0)
+    stu = getattr(u, "server_tool_use", None)
+    searches = (getattr(stu, "web_search_requests", 0) or 0) if stu else 0
+    usd = ((tin + 1.25 * tcr + 0.1 * tcw) * pin + tout * pout) / 1e6 + searches * _SEARCH_USD
+    row = _COST.setdefault(_STAGE[0], {"calls": 0, "in": 0, "out": 0, "searches": 0, "usd": 0.0})
+    row["calls"] += 1
+    row["in"] += tin + tcr + tcw
+    row["out"] += tout
+    row["searches"] += searches
+    row["usd"] += usd
+
+
+def cost_report() -> str:
+    if not _COST:
+        return "Cost meter: no Claude calls recorded."
+    tot = sum(r["usd"] for r in _COST.values())
+    lines = ["Cost by stage (estimated from API usage):",
+             f"  {'stage':34s} {'calls':>5s} {'searches':>8s} {'in tok':>9s} {'out tok':>8s} {'USD':>7s}  share"]
+    for stage, r in sorted(_COST.items(), key=lambda kv: -kv[1]["usd"]):
+        lines.append(f"  {stage:34s} {r['calls']:5d} {r['searches']:8d} {r['in']:9d} {r['out']:8d} "
+                     f"{r['usd']:7.2f}  {100 * r['usd'] / tot if tot else 0:4.0f}%")
+    lines.append(f"  {'TOTAL':34s} {sum(r['calls'] for r in _COST.values()):5d} "
+                 f"{sum(r['searches'] for r in _COST.values()):8d} "
+                 f"{sum(r['in'] for r in _COST.values()):9d} {sum(r['out'] for r in _COST.values()):8d} {tot:7.2f}")
+    return "\n".join(lines)
+
+
 def get_anthropic_client():
-    return Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    _orig_create = client.messages.create
+
+    def _metered_create(*args, **kwargs):
+        resp = _orig_create(*args, **kwargs)
+        try:
+            _track_usage(resp, kwargs.get("model", ""))
+        except Exception:
+            pass  # metering must never break a run
+        return resp
+
+    client.messages.create = _metered_create
+    return client
 
 
 # ---------- LLM call health ----------
@@ -460,7 +526,7 @@ Respond with ONLY: SCORE|reason (max 30 words)"""
 
 
 # ---------- 9-factor scoring ----------
-def score_candidate(ai_client: Anthropic, candidate: dict, sl_reason: str):
+def score_candidate(ai_client: Anthropic, candidate: dict, sl_reason: str, model: str = None):
     _raised = safe_float(candidate.get("total_funding_usd", 0))
     if _raised > 0:
         raised_line = f"${_raised:,.0f}"
@@ -537,7 +603,7 @@ FOUNDERS:Founder name(s), title(s), and prior background in <=40 words. CRITICAL
 
     try:
         response = ai_client.messages.create(
-            model=MODEL_SCORE,
+            model=model or MODEL,
             max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         )

@@ -53,7 +53,7 @@ from pipeline_utils import (
     verify_size_post_enrichment, confirm_funding_report,
     decision_from_score, write_scored_candidates, read_existing_names,
     send_email_digest, MIN_SCORE_PCT, WRITE_FLOOR_PCT, safe_float, ensure_tab,
-    record_llm_error, llm_error_count, llm_error_summary,
+    record_llm_error, llm_error_count, llm_error_summary, set_stage, cost_report,
 )
 from vertical_sources import (
     get_vertical, get_vertical_by_day_of_year, synthesize_vertical,
@@ -138,9 +138,16 @@ def _web_text(ai_client, prompt: str, model: str, max_uses: int, max_tokens: int
 # down (a few calls/run) while the best candidates get real data.
 DEEP_ENRICH = os.environ.get("DEEP_ENRICH", "1").strip() != "0"
 try:
-    ENRICH_TOP_N = int(os.environ.get("ENRICH_TOP_N") or "8")
+    ENRICH_TOP_N = int(os.environ.get("ENRICH_TOP_N") or "5")
 except ValueError:
-    ENRICH_TOP_N = 8
+    ENRICH_TOP_N = 5
+# Only deep-research candidates whose first-pass score is at least this high: a
+# company far below the cut-off won't be lifted into "recommended" by research,
+# so the web searches are wasted on it. 0 = research the top N regardless.
+try:
+    ENRICH_MIN_PCT = float(os.environ.get("ENRICH_MIN_PCT") or "50")
+except ValueError:
+    ENRICH_MIN_PCT = 50.0
 
 # Outreach digest: scrape each top candidate's website for a public email
 # (ENRICH_CONTACTS=0 to skip) and send that many in the email digest.
@@ -2116,7 +2123,7 @@ def _deep_enrich(ai_client, candidate: dict) -> str:
     try:
         resp = None
         for _ in range(4):  # allow pause_turn continuations
-            resp = ai_client.messages.create(model=MODEL_SCORE, max_tokens=2500,
+            resp = ai_client.messages.create(model=MODEL, max_tokens=2500,
                                              tools=tools, messages=messages)
             if resp.stop_reason != "pause_turn":
                 break
@@ -2232,6 +2239,7 @@ def main():
 
     # Step 0: Re-check the watchlist for movement (cross-vertical, cheap — free
     # deterministic signals, one Claude call only when a signal fires).
+    set_stage("0 watchlist re-check")
     print("STEP 0: Watchlist re-check")
     print("-" * 60)
     try:
@@ -2256,11 +2264,13 @@ def main():
         candidates.extend(source_sec_form_d(keywords, name))
     candidates.extend(source_techcrunch(keywords, name))
     candidates.extend(source_vertical_rss(rss_feeds, name))
+    set_stage("1 sourcing: web research")
     candidates.extend(source_vertical_claude_research(ai_client, search_terms, name))
     if EXTRA_SOURCES_ENABLED:
         candidates.extend(source_extra(vertical))
     else:
         print("[extra sources] skipped (EXTRA_SOURCES=0)")
+    set_stage("1 sourcing: scrape extraction")
     if SCRAPE_LAYER_ENABLED:
         candidates.extend(source_vertical_scrape(ai_client, sheet_client, vertical))
     elif get_scrape_targets(vertical):
@@ -2279,6 +2289,7 @@ def main():
     # Step 1b: Verify funding for $0 candidates before gating
     print("\nSTEP 1b: Verifying zero-funding candidates")
     print("-" * 60)
+    set_stage("1b funding verification")
     verify_zero_funding(ai_client, candidates)
     # Enrichment writes the founding year to `founded_year`; the age gate and the
     # scorer read `founded_date`. Fold it over so the enriched value is used.
@@ -2342,6 +2353,7 @@ def main():
     # demand for better-for-you alternatives in legacy indulgence categories).
     # Set SKIP_SECOND_LAYER_FOR_V20 = True to bypass the filter entirely for consumer.
     SKIP_SECOND_LAYER_FOR_V20 = False  # change to True to skip filter for V20 entirely
+    set_stage("3 second-layer / founder filter")
     print(f"\nSTEP 3: Second Layer filter")
     print("-" * 60)
     passed_sl = []
@@ -2407,6 +2419,7 @@ def main():
 
     # Step 4: 9-factor scoring (all Second Layer survivors — the score ranks
     # them, it no longer filters; anything >= WRITE_FLOOR_PCT is written).
+    set_stage("4 9-factor scoring")
     print(f"\nSTEP 4: 9-factor scoring")
     print("-" * 60)
     recs = []
@@ -2419,7 +2432,8 @@ def main():
 
     # Step 4b: deep-enrich + re-score the top ENRICH_TOP_N (web search).
     if DEEP_ENRICH and recs:
-        n = min(ENRICH_TOP_N, len(recs))
+        n = min(ENRICH_TOP_N, len([r for r in recs if r["weighted_pct"] >= ENRICH_MIN_PCT]))
+        set_stage("4b deep research + re-score")
         print(f"\nSTEP 4b: Deep research on the top {n} (web search + re-score)")
         print("-" * 60)
         for rec in recs[:n]:
@@ -2429,7 +2443,7 @@ def main():
                 print(f"  {cand.get('name', '?'):30s} no research result")
                 continue
             cand["_deep_context"] = deep
-            new = score_candidate(ai_client, cand, rec["sl_reason"])
+            new = score_candidate(ai_client, cand, rec["sl_reason"], model=MODEL_SCORE)
             old_pct = rec["weighted_pct"]
             rec.update(new)
             rec["decision"] = decision_from_score(rec["weighted_pct"])
@@ -2496,6 +2510,7 @@ def main():
 
     # Step 6b: Refresh the public Second Layer Map for this vertical (if it has a
     # taxonomy) — classifies its written companies into the trend's problem layers.
+    set_stage("6b map classification")
     if not industry_query:
         try:
             build_second_layer_map(ai_client, sheet_client, idx, name)
@@ -2518,6 +2533,7 @@ def main():
             header = f"Vertical: {name}\n"
         send_email_digest(subject=subject, body=header + "\n" + "\n\n".join(digest_parts))
 
+    print("\n" + cost_report())
     print(f"\n{'='*60}")
     print(f"Pipeline run complete — {label}: {name}")
     print(f"{'='*60}\n")
